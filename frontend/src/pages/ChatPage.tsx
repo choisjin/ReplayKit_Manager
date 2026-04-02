@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { Badge, Button, Card, Empty, Input, List, message, Modal, Space, Tag, Typography } from 'antd';
 import { CloseCircleOutlined, DeleteOutlined, SendOutlined, UserOutlined } from '@ant-design/icons';
 import { chatApi } from '../services/api';
+import NotificationBanner, { NotificationItem } from '../components/NotificationBanner';
 
 interface ChatRoom {
   id: string;
@@ -40,18 +41,6 @@ function playNotificationSound() {
   }
 }
 
-function requestNotificationPermission() {
-  if ('Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission();
-  }
-}
-
-function showBrowserNotification(title: string, body: string) {
-  if ('Notification' in window && Notification.permission === 'granted') {
-    new Notification(title, { body, icon: '/favicon.ico' });
-  }
-}
-
 export default function ChatPage() {
   const [rooms, setRooms] = useState<ChatRoom[]>([]);
   const [activeRoom, setActiveRoom] = useState<string | null>(null);
@@ -62,16 +51,11 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeout = useRef<ReturnType<typeof setTimeout>>();
   const activeRoomRef = useRef<string | null>(null);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
 
-  // activeRoom ref 동기화 (WebSocket 콜백에서 최신 값 참조)
   useEffect(() => {
     activeRoomRef.current = activeRoom;
   }, [activeRoom]);
-
-  // 알림 권한 요청
-  useEffect(() => {
-    requestNotificationPermission();
-  }, []);
 
   // WebSocket 연결
   useEffect(() => {
@@ -93,16 +77,15 @@ export default function ChatPage() {
             }
             return prev;
           });
-          // 다른 방이거나 유저 메시지면 알림
+          // 유저 메시지면 알림
           if (data.message?.sender === 'user') {
-            const userName = data.message.user_name || '유저';
             playNotificationSound();
-            if (activeRoomRef.current !== data.room_id) {
-              showBrowserNotification(
-                `새 메시지 - ${userName}`,
-                data.message.content,
-              );
-            }
+            setNotifications(prev => [...prev, {
+              id: Date.now(),
+              userName: data.message.user_name || '유저',
+              content: data.message.content,
+              roomId: data.room_id,
+            }]);
           }
           break;
         }
@@ -188,6 +171,12 @@ export default function ChatPage() {
   const activeRoomData = rooms.find(r => r.id === activeRoom);
 
   return (
+    <>
+    <NotificationBanner
+      notifications={notifications}
+      onClose={(id) => setNotifications(prev => prev.filter(n => n.id !== id))}
+      onClick={(roomId) => handleSelectRoom(roomId)}
+    />
     <div style={{ display: 'flex', gap: 16, height: 'calc(100vh - 120px)' }}>
       {/* 채팅방 목록 */}
       <Card
@@ -327,5 +316,6 @@ export default function ChatPage() {
         )}
       </Card>
     </div>
+    </>
   );
 }
