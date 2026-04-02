@@ -147,6 +147,16 @@ async def close_chat_room(room_id: str):
         conn.close()
     await asyncio.to_thread(_run)
 
+async def delete_chat_room(room_id: str) -> bool:
+    def _run():
+        conn = get_conn()
+        conn.execute("DELETE FROM chat_messages WHERE room_id=?", (room_id,))
+        cur = conn.execute("DELETE FROM chat_rooms WHERE id=?", (room_id,))
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
+    return await asyncio.to_thread(_run)
+
 async def update_room_unread(room_id: str, count: int):
     def _run():
         conn = get_conn()

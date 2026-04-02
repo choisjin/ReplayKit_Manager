@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
-import { Badge, Button, Card, Empty, Input, List, message, Space, Tag, Typography } from 'antd';
-import { CloseCircleOutlined, SendOutlined, UserOutlined } from '@ant-design/icons';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { Badge, Button, Card, Empty, Input, List, message, Modal, Space, Tag, Typography } from 'antd';
+import { CloseCircleOutlined, DeleteOutlined, SendOutlined, UserOutlined } from '@ant-design/icons';
 import { chatApi } from '../services/api';
 
 interface ChatRoom {
@@ -23,6 +23,35 @@ interface ChatMessage {
   user_name?: string;
 }
 
+// 알림 사운드 생성 (beep)
+function playNotificationSound() {
+  try {
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value = 800;
+    gain.gain.value = 0.3;
+    osc.start();
+    osc.stop(ctx.currentTime + 0.15);
+  } catch {
+    // AudioContext not available
+  }
+}
+
+function requestNotificationPermission() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+}
+
+function showBrowserNotification(title: string, body: string) {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    new Notification(title, { body, icon: '/favicon.ico' });
+  }
+}
+
 export default function ChatPage() {
   const [rooms, setRooms] = useState<ChatRoom[]>([]);
   const [activeRoom, setActiveRoom] = useState<string | null>(null);
@@ -32,6 +61,17 @@ export default function ChatPage() {
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeout = useRef<ReturnType<typeof setTimeout>>();
+  const activeRoomRef = useRef<string | null>(null);
+
+  // activeRoom ref 동기화 (WebSocket 콜백에서 최신 값 참조)
+  useEffect(() => {
+    activeRoomRef.current = activeRoom;
+  }, [activeRoom]);
+
+  // 알림 권한 요청
+  useEffect(() => {
+    requestNotificationPermission();
+  }, []);
 
   // WebSocket 연결
   useEffect(() => {
@@ -45,7 +85,7 @@ export default function ChatPage() {
         case 'room_list':
           setRooms(data.rooms);
           break;
-        case 'new_message':
+        case 'new_message': {
           // 현재 보고있는 방의 메시지면 추가
           setMessages(prev => {
             if (prev.length > 0 && prev[0]?.room_id === data.room_id) {
@@ -53,8 +93,19 @@ export default function ChatPage() {
             }
             return prev;
           });
-          // 방 목록 갱신 요청은 서버에서 자동 전송됨
+          // 다른 방이거나 유저 메시지면 알림
+          if (data.message?.sender === 'user') {
+            const userName = data.message.user_name || '유저';
+            playNotificationSound();
+            if (activeRoomRef.current !== data.room_id) {
+              showBrowserNotification(
+                `새 메시지 - ${userName}`,
+                data.message.content,
+              );
+            }
+          }
           break;
+        }
         case 'room_messages':
           if (data.messages) {
             setMessages(data.messages);
@@ -66,7 +117,6 @@ export default function ChatPage() {
           typingTimeout.current = setTimeout(() => setUserTyping(false), 2000);
           break;
         case 'user_disconnected':
-          // 방 목록 갱신
           break;
       }
     };
@@ -89,7 +139,6 @@ export default function ChatPage() {
     setActiveRoom(roomId);
     setMessages([]);
     setUserTyping(false);
-    // WS로 방 참여 알림 (서버가 히스토리 전송 + unread 리셋)
     wsRef.current?.send(JSON.stringify({ type: 'join_room', room_id: roomId }));
   };
 
@@ -100,7 +149,6 @@ export default function ChatPage() {
       room_id: activeRoom,
       content: inputVal.trim(),
     }));
-    // 로컬에 즉시 추가
     setMessages(prev => [...prev, {
       id: Date.now(),
       room_id: activeRoom,
@@ -123,6 +171,19 @@ export default function ChatPage() {
       message.error('종료 실패');
     }
   };
+
+  const handleDeleteRoom = useCallback(async (roomId: string) => {
+    try {
+      await chatApi.deleteRoom(roomId);
+      message.success('채팅방 삭제 완료');
+      if (activeRoom === roomId) {
+        setActiveRoom(null);
+        setMessages([]);
+      }
+    } catch {
+      message.error('삭제 실패');
+    }
+  }, [activeRoom]);
 
   const activeRoomData = rooms.find(r => r.id === activeRoom);
 
@@ -148,11 +209,30 @@ export default function ChatPage() {
                 background: activeRoom === room.id ? 'rgba(22,119,255,0.15)' : undefined,
               }}
               extra={
-                room.status === 'active' ? (
-                  <Badge count={room.unread_count} size="small" />
-                ) : (
-                  <Tag color="default">종료</Tag>
-                )
+                <Space size={4}>
+                  {room.status === 'active' ? (
+                    <Badge count={room.unread_count} size="small" />
+                  ) : (
+                    <Tag color="default">종료</Tag>
+                  )}
+                  <Button
+                    size="small"
+                    type="text"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      Modal.confirm({
+                        title: '채팅방 삭제',
+                        content: `${room.user_name} (${room.department}) 채팅을 삭제하시겠습니까?`,
+                        okText: '삭제',
+                        okButtonProps: { danger: true },
+                        cancelText: '취소',
+                        onOk: () => handleDeleteRoom(room.id),
+                      });
+                    }}
+                  />
+                </Space>
               }
             >
               <List.Item.Meta

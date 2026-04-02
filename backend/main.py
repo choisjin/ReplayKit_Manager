@@ -22,6 +22,10 @@ from . import database as db
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# 간단 관리자 계정 (하드코딩)
+ADMIN_USER = "admin"
+ADMIN_PASS = "admin"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -38,6 +42,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==================== 로그인 API ====================
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/api/login")
+async def login(req: LoginRequest):
+    if req.username == ADMIN_USER and req.password == ADMIN_PASS:
+        return {"status": "ok", "username": req.username}
+    raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 틀립니다")
 
 # ==================== 공지사항 API ====================
 
@@ -89,6 +105,21 @@ async def get_chat_rooms():
 @app.get("/api/chat/rooms/{room_id}/messages")
 async def get_room_messages(room_id: str):
     return await db.get_messages(room_id)
+
+@app.delete("/api/chat/rooms/{room_id}")
+async def delete_room(room_id: str):
+    # 연결된 유저에게 종료 알림
+    if room_id in user_connections:
+        ws = user_connections[room_id]
+        try:
+            await ws.send_json({"type": "closed", "message": "채팅이 삭제되었습니다."})
+        except Exception:
+            pass
+    ok = await db.delete_chat_room(room_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="채팅방을 찾을 수 없습니다")
+    await _notify_admins_room_update()
+    return {"status": "ok"}
 
 @app.post("/api/chat/rooms/{room_id}/close")
 async def close_room(room_id: str):
