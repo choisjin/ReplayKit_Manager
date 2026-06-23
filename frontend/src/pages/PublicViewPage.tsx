@@ -2,33 +2,34 @@ import { useEffect, useState } from 'react';
 import { Card, Checkbox, Empty, Image, Modal, Spin, Tag, Typography } from 'antd';
 import { announcementApi } from '../services/api';
 
+type AnnType = 'notice' | 'guide';
+
+interface GuideStep {
+  text: string;
+  image: string | null;
+}
+
 interface Announcement {
   id: number;
   title: string;
   content: string;
   priority: string;
   active: number;
-  image_data: string | null;
+  type: AnnType;
   is_popup: number;
+  image_data: string | null;
+  images: string[];
+  steps: GuideStep[];
   created_at: string;
   updated_at: string;
 }
 
-const priorityColor: Record<string, string> = {
-  urgent: 'red',
-  important: 'orange',
-  normal: 'blue',
-};
-const priorityLabel: Record<string, string> = {
-  urgent: '긴급',
-  important: '중요',
-  normal: '일반',
-};
+const priorityColor: Record<string, string> = { urgent: 'red', important: 'orange', normal: 'blue' };
+const priorityLabel: Record<string, string> = { urgent: '긴급', important: '중요', normal: '일반' };
 
 const DISMISS_KEY = 'popup_dismiss'; // { [id]: 'YYYY-MM-DD' }
 
 function todayStr(): string {
-  // 로컬 기준 YYYY-MM-DD
   const d = new Date();
   const m = `${d.getMonth() + 1}`.padStart(2, '0');
   const day = `${d.getDate()}`.padStart(2, '0');
@@ -43,6 +44,87 @@ function readDismiss(): Record<string, string> {
   }
 }
 
+// 단계 번호 뱃지
+function StepBadge({ n }: { n: number }) {
+  return (
+    <div style={{
+      flexShrink: 0,
+      width: 28, height: 28, borderRadius: '50%',
+      background: '#1677ff', color: '#fff',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      fontWeight: 600, fontSize: 14,
+    }}>
+      {n}
+    </div>
+  );
+}
+
+// 공지/가이드 본문 렌더러 (게시판·팝업 공용)
+function AnnouncementBody({ a, popup = false }: { a: Announcement; popup?: boolean }) {
+  if (a.type === 'guide') {
+    return (
+      <Image.PreviewGroup>
+        {a.content && (
+          <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 16 }}>
+            {a.content}
+          </Typography.Paragraph>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {(a.steps || []).map((step, i) => (
+            <div key={i} style={{ display: 'flex', gap: 12 }}>
+              <StepBadge n={i + 1} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {step.text && (
+                  <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', margin: '2px 0 8px' }}>
+                    {step.text}
+                  </Typography.Paragraph>
+                )}
+                {step.image && (
+                  <Image
+                    src={step.image}
+                    style={{ borderRadius: 8, border: '1px solid rgba(140,140,140,0.2)' }}
+                    preview={!popup}
+                  />
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Image.PreviewGroup>
+    );
+  }
+
+  // 일반 공지/안내
+  const imgs = a.images && a.images.length > 0 ? a.images : (a.image_data ? [a.image_data] : []);
+  return (
+    <>
+      {a.content && (
+        <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: imgs.length ? 16 : 0 }}>
+          {a.content}
+        </Typography.Paragraph>
+      )}
+      {imgs.length > 0 && (
+        <Image.PreviewGroup>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: imgs.length === 1 ? '1fr' : 'repeat(auto-fill, minmax(180px, 1fr))',
+            gap: 8,
+          }}>
+            {imgs.map((src, i) => (
+              <Image
+                key={i}
+                src={src}
+                style={{ borderRadius: 8, border: '1px solid rgba(140,140,140,0.2)', objectFit: 'cover' }}
+                preview={!popup}
+              />
+            ))}
+          </div>
+        </Image.PreviewGroup>
+      )}
+    </>
+  );
+}
+
 export default function PublicViewPage() {
   const [list, setList] = useState<Announcement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -51,11 +133,9 @@ export default function PublicViewPage() {
 
   const applyData = (items: Announcement[]) => {
     setList(items);
-    // 오늘 그만 보기로 닫지 않은 팝업만 표시
     const dismiss = readDismiss();
     const today = todayStr();
-    const toShow = items.filter((a) => a.is_popup && dismiss[a.id] !== today);
-    setPopups(toShow);
+    setPopups(items.filter((a) => a.is_popup && dismiss[a.id] !== today));
   };
 
   const fetchData = async () => {
@@ -63,7 +143,7 @@ export default function PublicViewPage() {
       const res = await announcementApi.list(true);
       applyData(res.data);
     } catch {
-      // 무시 (빈 화면 표시)
+      // 무시
     }
     setLoading(false);
   };
@@ -71,7 +151,6 @@ export default function PublicViewPage() {
   useEffect(() => {
     fetchData();
 
-    // 공지 실시간 갱신 구독 (관리자가 변경하면 자동 반영)
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws/announcements`);
     ws.onmessage = (ev) => {
@@ -99,11 +178,11 @@ export default function PublicViewPage() {
   };
 
   return (
-    <div style={{ maxWidth: 860, margin: '0 auto', padding: '32px 16px' }}>
+    <div style={{ maxWidth: 860, margin: '0 auto', padding: '40px 16px' }}>
       <Typography.Title level={2} style={{ textAlign: 'center', marginBottom: 4 }}>
         공지사항
       </Typography.Title>
-      <Typography.Paragraph type="secondary" style={{ textAlign: 'center', marginBottom: 32 }}>
+      <Typography.Paragraph type="secondary" style={{ textAlign: 'center', marginBottom: 36 }}>
         ReplayKit 안내 게시판
       </Typography.Paragraph>
 
@@ -112,24 +191,22 @@ export default function PublicViewPage() {
       ) : list.length === 0 ? (
         <Empty description="등록된 공지사항이 없습니다" style={{ marginTop: 80 }} />
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
           {list.map((a) => (
-            <Card key={a.id} size="small">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <Tag color={priorityColor[a.priority]}>{priorityLabel[a.priority] || a.priority}</Tag>
+            <Card
+              key={a.id}
+              styles={{ body: { padding: 24 } }}
+              style={{ boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+                <Tag color={priorityColor[a.priority]} style={{ margin: 0 }}>{priorityLabel[a.priority] || a.priority}</Tag>
+                {a.type === 'guide' && <Tag color="geekblue" style={{ margin: 0 }}>가이드</Tag>}
                 <Typography.Title level={4} style={{ margin: 0, flex: 1 }}>{a.title}</Typography.Title>
                 <Typography.Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
                   {new Date(a.created_at).toLocaleDateString('ko-KR')}
                 </Typography.Text>
               </div>
-              {a.image_data && (
-                <div style={{ marginBottom: 12, textAlign: 'center' }}>
-                  <Image src={a.image_data} style={{ maxWidth: '100%', borderRadius: 8 }} />
-                </div>
-              )}
-              <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
-                {a.content}
-              </Typography.Paragraph>
+              <AnnouncementBody a={a} />
             </Card>
           ))}
         </div>
@@ -138,30 +215,26 @@ export default function PublicViewPage() {
       <Modal
         open={popups.length > 0}
         onCancel={closePopups}
-        onOk={closePopups}
         footer={null}
         closable={false}
-        width={520}
+        width={560}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 20, maxHeight: '70vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 28, maxHeight: '68vh', overflowY: 'auto', paddingRight: 4 }}>
           {popups.map((p) => (
             <div key={p.id}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <Tag color={priorityColor[p.priority]}>{priorityLabel[p.priority] || p.priority}</Tag>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+                <Tag color={priorityColor[p.priority]} style={{ margin: 0 }}>{priorityLabel[p.priority] || p.priority}</Tag>
+                {p.type === 'guide' && <Tag color="geekblue" style={{ margin: 0 }}>가이드</Tag>}
                 <Typography.Title level={4} style={{ margin: 0 }}>{p.title}</Typography.Title>
               </div>
-              {p.image_data && (
-                <div style={{ marginBottom: 12, textAlign: 'center' }}>
-                  <Image src={p.image_data} style={{ maxWidth: '100%', borderRadius: 8 }} preview={false} />
-                </div>
-              )}
-              <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
-                {p.content}
-              </Typography.Paragraph>
+              <AnnouncementBody a={p} popup />
             </div>
           ))}
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 20, paddingTop: 12, borderTop: '1px solid rgba(140,140,140,0.2)' }}>
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          marginTop: 20, paddingTop: 12, borderTop: '1px solid rgba(140,140,140,0.2)',
+        }}>
           <Checkbox checked={dontShowToday} onChange={(e) => setDontShowToday(e.target.checked)}>
             오늘 하루 그만 보기
           </Checkbox>

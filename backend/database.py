@@ -2,6 +2,7 @@
 
 import sqlite3
 import asyncio
+import json
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -51,12 +52,35 @@ def init_db():
     """)
     # 마이그레이션: 기존 announcements 테이블에 신규 컬럼 추가
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(announcements)").fetchall()}
-    if "image_data" not in cols:
-        conn.execute("ALTER TABLE announcements ADD COLUMN image_data TEXT")
-    if "is_popup" not in cols:
-        conn.execute("ALTER TABLE announcements ADD COLUMN is_popup INTEGER DEFAULT 0")
+    migrations = [
+        ("image_data", "ALTER TABLE announcements ADD COLUMN image_data TEXT"),
+        ("is_popup", "ALTER TABLE announcements ADD COLUMN is_popup INTEGER DEFAULT 0"),
+        ("type", "ALTER TABLE announcements ADD COLUMN type TEXT DEFAULT 'notice'"),  # 'notice' | 'guide'
+        ("images", "ALTER TABLE announcements ADD COLUMN images TEXT"),  # JSON: data URL 목록
+        ("steps", "ALTER TABLE announcements ADD COLUMN steps TEXT"),    # JSON: [{text, image}]
+    ]
+    for col, ddl in migrations:
+        if col not in cols:
+            conn.execute(ddl)
     conn.commit()
     conn.close()
+
+
+def _row_to_ann(row) -> dict:
+    """DB row → dict. images/steps JSON 문자열을 리스트로 변환."""
+    d = dict(row)
+    for key in ("images", "steps"):
+        raw = d.get(key)
+        if raw:
+            try:
+                d[key] = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                d[key] = []
+        else:
+            d[key] = []
+    if not d.get("type"):
+        d["type"] = "notice"
+    return d
 
 # --- 공지사항 ---
 
@@ -66,19 +90,23 @@ async def create_announcement(
     priority: str = "normal",
     image_data: str | None = None,
     is_popup: int = 0,
+    type: str = "notice",
+    images: str | None = None,  # JSON 문자열
+    steps: str | None = None,   # JSON 문자열
 ) -> dict:
     def _run():
         conn = get_conn()
         now = _now()
         cur = conn.execute(
-            "INSERT INTO announcements (title, content, priority, active, image_data, is_popup, created_at, updated_at) "
-            "VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
-            (title, content, priority, image_data, is_popup, now, now),
+            "INSERT INTO announcements "
+            "(title, content, priority, active, image_data, is_popup, type, images, steps, created_at, updated_at) "
+            "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
+            (title, content, priority, image_data, is_popup, type, images, steps, now, now),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM announcements WHERE id=?", (cur.lastrowid,)).fetchone()
         conn.close()
-        return dict(row)
+        return _row_to_ann(row)
     return await asyncio.to_thread(_run)
 
 async def list_announcements(active_only: bool = False) -> list[dict]:
@@ -89,7 +117,7 @@ async def list_announcements(active_only: bool = False) -> list[dict]:
         else:
             rows = conn.execute("SELECT * FROM announcements ORDER BY created_at DESC").fetchall()
         conn.close()
-        return [dict(r) for r in rows]
+        return [_row_to_ann(r) for r in rows]
     return await asyncio.to_thread(_run)
 
 async def update_announcement(ann_id: int, **kwargs) -> dict | None:
@@ -98,7 +126,7 @@ async def update_announcement(ann_id: int, **kwargs) -> dict | None:
         sets = []
         vals = []
         for k, v in kwargs.items():
-            if k in ("title", "content", "priority", "active", "image_data", "is_popup"):
+            if k in ("title", "content", "priority", "active", "image_data", "is_popup", "type", "images", "steps"):
                 sets.append(f"{k}=?")
                 vals.append(v)
         if not sets:
@@ -111,7 +139,7 @@ async def update_announcement(ann_id: int, **kwargs) -> dict | None:
         conn.commit()
         row = conn.execute("SELECT * FROM announcements WHERE id=?", (ann_id,)).fetchone()
         conn.close()
-        return dict(row) if row else None
+        return _row_to_ann(row) if row else None
     return await asyncio.to_thread(_run)
 
 async def delete_announcement(ann_id: int) -> bool:

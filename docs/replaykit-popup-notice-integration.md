@@ -70,27 +70,63 @@ ReplayKit이 `image_path`를 기다리면 이미지가 **영원히 안 나옵니
 GET http://<MANAGER_HOST>:9000/api/announcements?active_only=true
 ```
 
-응답(JSON 배열):
+응답(JSON 배열). 공지는 **두 가지 양식(`type`)** 이 있다:
+
+**(a) 일반 공지/안내 — `type: "notice"`** (이미지 여러 장)
 
 ```json
-[
-  {
-    "id": 12,
-    "title": "정기 점검 안내",
-    "content": "오늘 22:00 ~ 23:00 점검이 진행됩니다.\n이용에 참고 바랍니다.",
-    "priority": "important",          // "normal" | "important" | "urgent"
-    "active": 1,
-    "image_data": "data:image/png;base64,iVBORw0KGgo...",  // null/빈문자열 가능
-    "is_popup": 1,                     // 1이면 시작 시 팝업으로 표시
-    "created_at": "2026-06-23T01:11:15.314000+00:00",
-    "updated_at": "2026-06-23T01:11:15.314000+00:00"
-  }
-]
+{
+  "id": 12,
+  "type": "notice",
+  "title": "정기 점검 안내",
+  "content": "오늘 22:00 ~ 23:00 점검이 진행됩니다.\n이용에 참고 바랍니다.",
+  "priority": "important",          // "normal" | "important" | "urgent"
+  "active": 1,
+  "is_popup": 1,                     // 1이면 시작 시 팝업으로 표시
+  "images": [                        // 이미지 여러 장 (data URL 배열)
+    "data:image/png;base64,iVBORw0KGgo...",
+    "data:image/png;base64,iVBORw0KGgo..."
+  ],
+  "steps": [],
+  "image_data": "data:image/png;base64,iVBORw0KGgo...",  // 하위호환: images[0]
+  "created_at": "2026-06-23T01:11:15.314000+00:00",
+  "updated_at": "2026-06-23T01:11:15.314000+00:00"
+}
 ```
 
-- `image_data`: **data URL 문자열**. 값이 있으면 그대로 이미지 소스로 사용. 없으면(`null`/`""`) 텍스트만 표시.
+**(b) 단계별 가이드 — `type: "guide"`** (순서대로 글+이미지)
+
+```json
+{
+  "id": 13,
+  "type": "guide",
+  "title": "앱 설치 방법",
+  "content": "아래 순서대로 진행하세요.",   // 개요(선택)
+  "priority": "normal",
+  "active": 1,
+  "is_popup": 1,
+  "images": [],
+  "steps": [                          // 순서가 곧 표시 순서
+    { "text": "설치 파일을 실행합니다.", "image": "data:image/png;base64,..." },
+    { "text": "'다음'을 누릅니다.",      "image": "data:image/png;base64,..." }
+  ],
+  "image_data": "data:image/png;base64,...",  // 하위호환: 첫 단계 이미지
+  "created_at": "...",
+  "updated_at": "..."
+}
+```
+
+필드 요약:
+- `type`: **`"notice"` | `"guide"`**. 없으면(undefined) `"notice"`로 간주.
+- `content`: 본문(notice) 또는 개요(guide, 비어있을 수 있음).
+- `images`: notice용 data URL **배열**(0~N장).
+- `steps`: guide용 `{ text, image }` **배열**(순서 = 표시 순서). `image`는 `null` 가능.
+- `image_data`: **하위호환용 단일 이미지**(첫 이미지). 구버전 클라이언트는 이것만 써도 됨.
 - `is_popup`: `1`이면 시작 시 팝업 대상.
-- 정렬: 활성 목록은 우선순위(긴급>중요>일반) 후 최신순으로 내려온다.
+- 정렬: 활성 목록은 우선순위(긴급>중요>일반) 후 최신순.
+
+> 모든 신규 필드는 **하위호환**된다. 예전처럼 `image_data` + `content`만 써도 동작하며,
+> 양식을 제대로 표현하려면 `type`에 따라 `images`(갤러리) / `steps`(번호 단계)를 렌더하면 된다.
 
 ### 4.2 실시간 갱신 (선택, 권장)
 
@@ -111,9 +147,15 @@ WS  ws://<MANAGER_HOST>:9000/ws/announcements
    - 저장: 영구 저장소(웹=localStorage, 데스크톱=설정파일 등)에 `{ [공지id]: "YYYY-MM-DD" }` 형태.
    - 표시 조건: `is_popup === 1` 이고 `저장된날짜[id] !== 오늘` 인 공지만 팝업.
 3. **읽기 전용**: 수정/삭제 UI 없음.
-4. **이미지**: `image_data` 있으면 인라인 표시(`img src={image_data}`). 로드 실패 시 텍스트만.
+4. **양식별 렌더링** (`type`):
+   - `notice`: `content` 텍스트 + `images` 배열을 **갤러리(그리드)** 로 표시. (`images`가 비면 `image_data` 폴백)
+   - `guide`: `content`(개요) + `steps`를 **번호 단계**로 세로 표시. 각 단계 = 번호 + `text` + `image`.
+   - 이미지는 모두 data URL이라 `img src`에 바로 넣는다. 로드 실패 시 해당 이미지 숨김.
 5. **우선순위 표기**(선택): `urgent`=긴급(빨강), `important`=중요(주황), `normal`=일반(파랑).
 6. (선택) **공지 목록 화면**: 활성 공지 전체를 읽기 전용으로 표시.
+
+> 매니저의 공개 페이지 `frontend/src/pages/PublicViewPage.tsx` 의 `AnnouncementBody` 컴포넌트가
+> notice/guide 양식 렌더링의 **참고 구현**이다(갤러리 그리드 + 번호 단계 뱃지).
 
 ### 5.1 팝업 로직 (의사코드 — 스택 무관)
 

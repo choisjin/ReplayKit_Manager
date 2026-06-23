@@ -57,20 +57,38 @@ async def login(req: LoginRequest):
 
 # ==================== 공지사항 API ====================
 
+class GuideStep(BaseModel):
+    text: str = ""
+    image: Optional[str] = None  # base64 data URL
+
 class AnnouncementCreate(BaseModel):
     title: str
-    content: str
+    content: str = ""
     priority: str = "normal"  # normal, important, urgent
-    image_data: Optional[str] = None  # base64 data URL (선택)
-    is_popup: int = 0  # 1이면 사용자 화면 진입 시 팝업으로 표시
+    type: str = "notice"      # 'notice'(일반 공지/안내) | 'guide'(단계별 가이드)
+    is_popup: int = 0         # 1이면 사용자 화면 진입 시 팝업으로 표시
+    images: list[str] = []    # 일반 공지: data URL 목록(여러 장)
+    steps: list[GuideStep] = []  # 가이드: 순서대로 글+이미지
 
 class AnnouncementUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     priority: Optional[str] = None
     active: Optional[int] = None
-    image_data: Optional[str] = None
+    type: Optional[str] = None
     is_popup: Optional[int] = None
+    images: Optional[list[str]] = None
+    steps: Optional[list[GuideStep]] = None
+
+
+def _first_image(images: list[str], steps: list[dict]) -> Optional[str]:
+    """하위호환용 단일 image_data: 첫 이미지를 선택."""
+    if images:
+        return images[0]
+    for s in steps:
+        if s.get("image"):
+            return s["image"]
+    return None
 
 @app.get("/api/announcements")
 async def get_announcements(active_only: bool = False):
@@ -78,8 +96,17 @@ async def get_announcements(active_only: bool = False):
 
 @app.post("/api/announcements")
 async def create_announcement(req: AnnouncementCreate):
+    images = req.images or []
+    steps = [s.model_dump() for s in (req.steps or [])]
     ann = await db.create_announcement(
-        req.title, req.content, req.priority, req.image_data, req.is_popup
+        req.title,
+        req.content,
+        req.priority,
+        image_data=_first_image(images, steps),
+        is_popup=req.is_popup,
+        type=req.type,
+        images=json.dumps(images, ensure_ascii=False),
+        steps=json.dumps(steps, ensure_ascii=False),
     )
     # 새 공지 알림을 연결된 클라이언트에게 전파
     await _broadcast_announcement_update()
@@ -87,8 +114,17 @@ async def create_announcement(req: AnnouncementCreate):
 
 @app.put("/api/announcements/{ann_id}")
 async def update_announcement(ann_id: int, req: AnnouncementUpdate):
-    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
-    result = await db.update_announcement(ann_id, **kwargs)
+    data = req.model_dump(exclude_none=True)
+    images = data.get("images")
+    steps = data.get("steps")  # list[dict] (model_dump 변환됨)
+    # 이미지/단계가 갱신되면 단일 image_data(하위호환)도 재계산
+    if images is not None or steps is not None:
+        data["image_data"] = _first_image(images or [], steps or [])
+    if images is not None:
+        data["images"] = json.dumps(images, ensure_ascii=False)
+    if steps is not None:
+        data["steps"] = json.dumps(steps, ensure_ascii=False)
+    result = await db.update_announcement(ann_id, **data)
     if not result:
         raise HTTPException(status_code=404, detail="공지사항을 찾을 수 없습니다")
     await _broadcast_announcement_update()
