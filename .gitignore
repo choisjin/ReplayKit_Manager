@@ -1,7 +1,5 @@
 venv/
 python/
-get-pip.py
-python-*-embed-amd64.zip
 __pycache__/
 *.pyc
 backend/admin.db
