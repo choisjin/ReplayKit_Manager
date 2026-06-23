@@ -16,7 +16,7 @@ function isPublicView() {
 
 function AppContent() {
   const [activeKey, setActiveKey] = useState('announcements');
-  const [darkMode, setDarkMode] = useState(true);
+  const [darkMode, setDarkMode] = useState(false);
   const [loggedIn, setLoggedIn] = useState(() => sessionStorage.getItem('logged_in') === '1');
 
   const [updating, setUpdating] = useState(false);
