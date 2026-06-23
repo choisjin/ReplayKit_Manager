@@ -6,9 +6,9 @@ import {
 import type { UploadFile } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, UploadOutlined, LinkOutlined,
-  ArrowUpOutlined, ArrowDownOutlined,
+  ArrowUpOutlined, ArrowDownOutlined, TranslationOutlined,
 } from '@ant-design/icons';
-import { announcementApi } from '../services/api';
+import { announcementApi, translateApi } from '../services/api';
 
 const { TextArea } = Input;
 
@@ -68,6 +68,8 @@ export default function AnnouncementsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Announcement | null>(null);
   const [type, setType] = useState<AnnType>('notice');
+  const [editLang, setEditLang] = useState<'ko' | 'en'>('ko'); // 편집기 표시 언어
+  const [translating, setTranslating] = useState(false);
   const [images, setImages] = useState<string[]>([]);      // 일반 공지 이미지들
   const [steps, setSteps] = useState<GuideStep[]>([]);     // 가이드 단계들
   const [form] = Form.useForm();
@@ -89,6 +91,7 @@ export default function AnnouncementsPage() {
 
   const resetState = () => {
     setType('notice');
+    setEditLang('ko');
     setImages([]);
     setSteps([]);
     form.resetFields();
@@ -103,6 +106,7 @@ export default function AnnouncementsPage() {
   const openEdit = (record: Announcement) => {
     setEditing(record);
     setType(record.type || 'notice');
+    setEditLang('ko');
     setImages(record.images || []);
     setSteps(record.steps || []);
     form.setFieldsValue({
@@ -142,6 +146,31 @@ export default function AnnouncementsPage() {
     } else {
       doClose();
     }
+  };
+
+  // 번역 버튼: 한국어 → 영문란 채우기 (작성자 검토용)
+  const handleTranslate = async () => {
+    const values = form.getFieldsValue();
+    const stepTexts = type === 'guide' ? steps.map((s) => s.text || '') : [];
+    const texts = [values.title || '', values.content || '', ...stepTexts];
+    if (!texts.some((t) => t.trim())) {
+      message.info('번역할 한국어 내용을 먼저 입력하세요');
+      return;
+    }
+    setTranslating(true);
+    try {
+      const res = await translateApi.toEn(texts);
+      const tr: string[] = res.data.translations || [];
+      form.setFieldsValue({ title_en: tr[0] || '', content_en: tr[1] || '' });
+      if (type === 'guide') {
+        setSteps((prev) => prev.map((s, i) => ({ ...s, text_en: tr[2 + i] ?? s.text_en ?? '' })));
+      }
+      setEditLang('en');
+      message.success('번역 완료 — 영문을 검토/수정하세요');
+    } catch {
+      message.error('번역 실패 (서버의 번역 기능/인터넷 연결을 확인하세요)');
+    }
+    setTranslating(false);
   };
 
   const handleSubmit = async () => {
@@ -338,31 +367,56 @@ export default function AnnouncementsPage() {
             ]}
           />
         </div>
+        {/* 언어 토글 + 번역 버튼 */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+          <Segmented
+            value={editLang}
+            onChange={(v) => setEditLang(v as 'ko' | 'en')}
+            options={[{ label: '한국어', value: 'ko' }, { label: 'English', value: 'en' }]}
+          />
+          <Button
+            icon={<TranslationOutlined />}
+            loading={translating}
+            onClick={handleTranslate}
+          >
+            한국어 → 영문 번역
+          </Button>
+        </div>
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 16 }}>
-          영문은 <b>비워두면 자동 번역</b>, 직접 입력하면 그대로 사용됩니다. (사용자 페이지에서 한/영 토글)
+          한국어로 작성 후 <b>번역</b> 버튼을 누르면 영문란이 채워집니다(검토·수정 가능). 영문을 비워두면 저장 시 자동 번역됩니다.
         </Typography.Paragraph>
 
         <Form form={form} layout="vertical" initialValues={{ priority: 'normal', is_popup: false }}>
-          <Form.Item name="title" label="제목" rules={[{ required: true, message: '제목을 입력하세요' }]}>
-            <Input placeholder={type === 'guide' ? '가이드 제목' : '공지사항 제목'} />
-          </Form.Item>
-          <Form.Item name="title_en" label="제목 (English · 선택)">
-            <Input placeholder="비워두면 자동 번역됩니다" />
-          </Form.Item>
+          {/* 제목: 언어별 토글 (둘 다 마운트, 표시만 전환) */}
+          <div style={{ display: editLang === 'ko' ? 'block' : 'none' }}>
+            <Form.Item name="title" label="제목" rules={[{ required: true, message: '제목을 입력하세요' }]}>
+              <Input placeholder={type === 'guide' ? '가이드 제목' : '공지사항 제목'} />
+            </Form.Item>
+          </div>
+          <div style={{ display: editLang === 'en' ? 'block' : 'none' }}>
+            <Form.Item name="title_en" label="Title (English)">
+              <Input placeholder="번역 버튼을 누르거나 직접 입력" />
+            </Form.Item>
+          </div>
 
-          <Form.Item
-            name="content"
-            label={type === 'guide' ? '개요 (선택)' : '내용'}
-            rules={type === 'notice' ? [{ required: true, message: '내용을 입력하세요' }] : []}
-          >
-            <TextArea
-              rows={type === 'guide' ? 3 : 6}
-              placeholder={type === 'guide' ? '가이드 전체 개요를 간단히 입력 (선택)' : '공지사항 내용'}
-            />
-          </Form.Item>
-          <Form.Item name="content_en" label={(type === 'guide' ? '개요' : '내용') + ' (English · 선택)'}>
-            <TextArea rows={type === 'guide' ? 2 : 4} placeholder="비워두면 자동 번역됩니다" />
-          </Form.Item>
+          {/* 내용/개요 */}
+          <div style={{ display: editLang === 'ko' ? 'block' : 'none' }}>
+            <Form.Item
+              name="content"
+              label={type === 'guide' ? '개요 (선택)' : '내용'}
+              rules={type === 'notice' ? [{ required: true, message: '내용을 입력하세요' }] : []}
+            >
+              <TextArea
+                rows={type === 'guide' ? 3 : 6}
+                placeholder={type === 'guide' ? '가이드 전체 개요를 간단히 입력 (선택)' : '공지사항 내용'}
+              />
+            </Form.Item>
+          </div>
+          <div style={{ display: editLang === 'en' ? 'block' : 'none' }}>
+            <Form.Item name="content_en" label={(type === 'guide' ? 'Overview' : 'Content') + ' (English)'}>
+              <TextArea rows={type === 'guide' ? 3 : 6} placeholder="번역 버튼을 누르거나 직접 입력" />
+            </Form.Item>
+          </div>
 
           {type === 'notice' && (
             <Form.Item label="이미지 (여러 장 가능, 각 2MB 이하)">
@@ -401,20 +455,23 @@ export default function AnnouncementsPage() {
                       </Space>
                     }
                   >
-                    <TextArea
-                      rows={2}
-                      value={step.text}
-                      onChange={(e) => updateStep(i, { text: e.target.value })}
-                      placeholder={`${i + 1}단계 설명`}
-                      style={{ marginBottom: 8 }}
-                    />
-                    <TextArea
-                      rows={2}
-                      value={step.text_en}
-                      onChange={(e) => updateStep(i, { text_en: e.target.value })}
-                      placeholder={`${i + 1}단계 설명 (English · 선택, 비우면 자동 번역)`}
-                      style={{ marginBottom: 8 }}
-                    />
+                    {editLang === 'ko' ? (
+                      <TextArea
+                        rows={2}
+                        value={step.text}
+                        onChange={(e) => updateStep(i, { text: e.target.value })}
+                        placeholder={`${i + 1}단계 설명`}
+                        style={{ marginBottom: 8 }}
+                      />
+                    ) : (
+                      <TextArea
+                        rows={2}
+                        value={step.text_en}
+                        onChange={(e) => updateStep(i, { text_en: e.target.value })}
+                        placeholder={`Step ${i + 1} description (English)`}
+                        style={{ marginBottom: 8 }}
+                      />
+                    )}
                     <Upload
                       listType="picture-card"
                       maxCount={1}

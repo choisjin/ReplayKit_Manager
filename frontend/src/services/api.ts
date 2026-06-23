@@ -18,6 +18,10 @@ export const systemApi = {
   update: () => api.post('/update'),
 };
 
+export const translateApi = {
+  toEn: (texts: string[]) => api.post('/translate', { texts }),
+};
+
 export const chatApi = {
   rooms: () => api.get('/chat/rooms'),
   messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),

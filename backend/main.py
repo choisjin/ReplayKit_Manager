@@ -210,6 +210,17 @@ def _first_image(images: list[str], steps: list[dict]) -> Optional[str]:
             return s["image"]
     return None
 
+class TranslateRequest(BaseModel):
+    texts: list[str]
+
+@app.post("/api/translate")
+async def translate_texts(req: TranslateRequest):
+    """여러 한국어 텍스트를 영어로 번역(작성 중 검토용)."""
+    if not _TRANSLATOR_OK:
+        raise HTTPException(status_code=503, detail="번역 기능을 사용할 수 없습니다 (deep-translator 미설치/오프라인)")
+    results = await asyncio.gather(*[asyncio.to_thread(_translate_en_sync, t) for t in req.texts])
+    return {"translations": list(results)}
+
 @app.get("/api/announcements")
 async def get_announcements(active_only: bool = False):
     return await db.list_announcements(active_only)
