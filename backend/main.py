@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import uuid
+import webbrowser
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -31,10 +32,32 @@ ADMIN_USER = "admin"
 ADMIN_PASS = "admin"
 
 
+def _maybe_open_browser():
+    """서버 기동 후 기본 브라우저로 localhost:9000 자동 열기.
+
+    - REPLAYKIT_OPEN_BROWSER=0 이면 비활성화(업데이트 재시작 시 자동 설정).
+    - --reload(개발) 모드에서는 리로드마다 열리는 것을 방지.
+    """
+    if os.environ.get("REPLAYKIT_OPEN_BROWSER", "1") == "0":
+        return
+    if "--reload" in sys.argv:
+        return
+
+    def _open():
+        try:
+            webbrowser.open("http://localhost:9000")
+        except Exception as e:
+            logger.warning("브라우저 자동 열기 실패: %s", e)
+
+    # 소켓이 실제로 연결을 받을 때까지 약간 대기
+    threading.Timer(1.5, _open).start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
     logger.info("Admin server started — DB initialized")
+    _maybe_open_browser()
     yield
 
 app = FastAPI(title="ReplayKit Admin", lifespan=lifespan)
@@ -111,6 +134,8 @@ async def update_app():
         # 운영 모드: 응답을 보낸 뒤 같은 프로세스를 재실행
         def _restart():
             logger.info("Restarting server (os.execv)...")
+            # 재시작 시에는 브라우저를 다시 열지 않음
+            os.environ["REPLAYKIT_OPEN_BROWSER"] = "0"
             os.execv(sys.executable, [sys.executable, "-m", "uvicorn", *sys.argv[1:]])
         threading.Timer(1.0, _restart).start()
 
