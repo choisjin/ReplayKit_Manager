@@ -14,6 +14,10 @@ export const announcementApi = {
   delete: (id: number) => api.delete(`/announcements/${id}`),
 };
 
+export const systemApi = {
+  update: () => api.post('/update'),
+};
+
 export const chatApi = {
   rooms: () => api.get('/chat/rooms'),
   messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),

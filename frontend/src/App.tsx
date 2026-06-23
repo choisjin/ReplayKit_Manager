@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { App as AntdApp, Button, ConfigProvider, Layout, Menu, theme } from 'antd';
-import { BulbOutlined, BulbFilled, LogoutOutlined, NotificationOutlined, MessageOutlined } from '@ant-design/icons';
+import { App as AntdApp, Button, ConfigProvider, Layout, Menu, message, Modal, theme } from 'antd';
+import { BulbOutlined, BulbFilled, LogoutOutlined, NotificationOutlined, MessageOutlined, SyncOutlined } from '@ant-design/icons';
 import AnnouncementsPage from './pages/AnnouncementsPage';
 import ChatPage from './pages/ChatPage';
 import LoginPage from './pages/LoginPage';
 import PublicViewPage from './pages/PublicViewPage';
+import { systemApi } from './services/api';
 
 const { Sider, Content, Header } = Layout;
 
@@ -18,9 +19,52 @@ function AppContent() {
   const [darkMode, setDarkMode] = useState(true);
   const [loggedIn, setLoggedIn] = useState(() => sessionStorage.getItem('logged_in') === '1');
 
+  const [updating, setUpdating] = useState(false);
+
   const handleLogout = () => {
     sessionStorage.removeItem('logged_in');
     setLoggedIn(false);
+  };
+
+  const handleUpdate = () => {
+    Modal.confirm({
+      title: '업데이트',
+      content: '최신 코드를 받아 서버를 재시작합니다. 진행하시겠습니까?',
+      okText: '업데이트',
+      cancelText: '취소',
+      onOk: async () => {
+        setUpdating(true);
+        try {
+          await systemApi.update();
+        } catch {
+          // 재시작 과정에서 응답이 끊길 수 있음 — 무시하고 복귀를 폴링
+        }
+        message.loading({ content: '서버 재시작 중... 잠시만 기다려 주세요', key: 'update', duration: 0 });
+        const startedAt = Date.now();
+        const poll = async () => {
+          try {
+            const res = await fetch('/health', { cache: 'no-store' });
+            if (res.ok) {
+              message.destroy('update');
+              message.success('업데이트 완료 — 새로고침합니다');
+              setTimeout(() => window.location.reload(), 600);
+              return;
+            }
+          } catch {
+            // 아직 재시작 중
+          }
+          if (Date.now() - startedAt < 60000) {
+            setTimeout(poll, 1500);
+          } else {
+            message.destroy('update');
+            message.error('재시작 확인 실패 — 잠시 후 수동으로 새로고침해 주세요');
+            setUpdating(false);
+          }
+        };
+        // 재시작이 시작될 시간을 준 뒤 폴링 시작
+        setTimeout(poll, 3000);
+      },
+    });
   };
 
   if (!loggedIn) {
@@ -67,6 +111,15 @@ function AppContent() {
               background: darkMode ? '#141414' : '#fff',
               borderBottom: `1px solid ${darkMode ? '#303030' : '#f0f0f0'}`,
             }}>
+              <Button
+                type="text"
+                icon={<SyncOutlined spin={updating} />}
+                loading={false}
+                onClick={handleUpdate}
+                disabled={updating}
+              >
+                업데이트
+              </Button>
               <Button
                 type="text"
                 icon={darkMode ? <BulbOutlined /> : <BulbFilled />}

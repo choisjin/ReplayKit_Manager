@@ -5,6 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import subprocess
+import sys
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -54,6 +58,63 @@ async def login(req: LoginRequest):
     if req.username == ADMIN_USER and req.password == ADMIN_PASS:
         return {"status": "ok", "username": req.username}
     raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 틀립니다")
+
+# ==================== 시스템(업데이트) API ====================
+# ⚠️ 주의: 이 엔드포인트는 git pull + 서버 재시작을 수행한다.
+#    내부망 관리 도구 전제이며, 외부 노출 시 인증 보강이 필요하다.
+
+_PROJECT_ROOT = Path(__file__).parent.parent
+
+
+def _git(args: list[str], timeout: int = 90) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(_PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
+
+
+def _deploy_remote() -> str:
+    """run.bat과 동일하게 deploy 리모트가 있으면 우선 사용, 없으면 origin."""
+    r = _git(["remote", "get-url", "deploy"], timeout=15)
+    return "deploy" if r.returncode == 0 else "origin"
+
+
+@app.post("/api/update")
+async def update_app():
+    """최신 코드를 받아(git) 서버를 재시작한다."""
+    remote = _deploy_remote()
+    try:
+        fetch = _git(["fetch", remote, "main"])
+        if fetch.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"git fetch 실패: {fetch.stderr.strip()}")
+        reset = _git(["reset", "--hard", f"{remote}/main"])
+        if reset.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"git reset 실패: {reset.stderr.strip()}")
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="git 실행 파일을 찾을 수 없습니다")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="git 작업 시간 초과")
+
+    head = reset.stdout.strip()
+    logger.info("Update pulled from %s/main: %s", remote, head)
+
+    reload_mode = "--reload" in sys.argv
+    if reload_mode:
+        # --reload 모드: 파일이 바뀌면 uvicorn이 자동 재시작하므로 별도 재실행 불필요
+        logger.info("Reload mode — uvicorn will auto-restart on file change")
+    else:
+        # 운영 모드: 응답을 보낸 뒤 같은 프로세스를 재실행
+        def _restart():
+            logger.info("Restarting server (os.execv)...")
+            os.execv(sys.executable, [sys.executable, "-m", "uvicorn", *sys.argv[1:]])
+        threading.Timer(1.0, _restart).start()
+
+    return {"status": "updating", "remote": remote, "head": head, "reload": reload_mode}
 
 # ==================== 공지사항 API ====================
 
