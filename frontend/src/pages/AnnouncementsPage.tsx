@@ -18,13 +18,16 @@ type AnnType = 'notice' | 'guide';
 
 interface GuideStep {
   text: string;
+  text_en?: string;
   image: string | null;
 }
 
 interface Announcement {
   id: number;
   title: string;
+  title_en?: string;
   content: string;
+  content_en?: string;
   priority: string;
   active: number;
   type: AnnType;
@@ -104,17 +107,41 @@ export default function AnnouncementsPage() {
     setSteps(record.steps || []);
     form.setFieldsValue({
       title: record.title,
+      title_en: record.title_en,
       content: record.content,
+      content_en: record.content_en,
       priority: record.priority,
       is_popup: !!record.is_popup,
     });
     setModalOpen(true);
   };
 
-  const closeModal = () => {
+  const doClose = () => {
     setModalOpen(false);
     setEditing(null);
     resetState();
+  };
+
+  // 작성 중인 내용이 있는지
+  const hasContent = () => {
+    const v = form.getFieldsValue();
+    return !!(v.title || v.content || v.title_en || v.content_en || images.length || steps.length);
+  };
+
+  // 취소(또는 닫기) 시 작성 내용이 있으면 확인
+  const handleCancel = () => {
+    if (hasContent()) {
+      Modal.confirm({
+        title: '작성 취소',
+        content: '작성 중인 내용이 사라집니다. 닫으시겠습니까?',
+        okText: '닫기',
+        okButtonProps: { danger: true },
+        cancelText: '계속 작성',
+        onOk: doClose,
+      });
+    } else {
+      doClose();
+    }
   };
 
   const handleSubmit = async () => {
@@ -125,12 +152,16 @@ export default function AnnouncementsPage() {
     }
     const payload = {
       title: values.title,
+      title_en: values.title_en || '',
       content: values.content || '',
+      content_en: values.content_en || '',
       priority: values.priority,
       type,
       is_popup: values.is_popup ? 1 : 0,
       images: type === 'notice' ? images : [],
-      steps: type === 'guide' ? steps.map((s) => ({ text: s.text || '', image: s.image || null })) : [],
+      steps: type === 'guide'
+        ? steps.map((s) => ({ text: s.text || '', text_en: s.text_en || '', image: s.image || null }))
+        : [],
     };
     try {
       if (editing) {
@@ -140,7 +171,7 @@ export default function AnnouncementsPage() {
         await announcementApi.create(payload);
         message.success('등록 완료');
       }
-      closeModal();
+      doClose();
       fetchData();
     } catch {
       message.error('저장 실패');
@@ -173,7 +204,7 @@ export default function AnnouncementsPage() {
   }));
 
   // --- 가이드 단계 ---
-  const addStep = () => setSteps((prev) => [...prev, { text: '', image: null }]);
+  const addStep = () => setSteps((prev) => [...prev, { text: '', text_en: '', image: null }]);
   const updateStep = (i: number, patch: Partial<GuideStep>) =>
     setSteps((prev) => prev.map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
   const removeStep = (i: number) => setSteps((prev) => prev.filter((_, idx) => idx !== i));
@@ -288,10 +319,12 @@ export default function AnnouncementsPage() {
         title={editing ? '공지사항 수정' : '새 공지사항 등록'}
         open={modalOpen}
         onOk={handleSubmit}
-        onCancel={closeModal}
+        onCancel={handleCancel}
         okText={editing ? '수정' : '등록'}
         cancelText="취소"
         width={680}
+        maskClosable={false}
+        keyboard={false}
         styles={{ body: { maxHeight: '70vh', overflowY: 'auto' } }}
       >
         <div style={{ marginBottom: 8 }}>
@@ -306,12 +339,15 @@ export default function AnnouncementsPage() {
           />
         </div>
         <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 16 }}>
-          한국어로 작성하면 영문 페이지는 <b>자동 번역</b>되어 제공됩니다. (사용자 페이지에서 한/영 토글)
+          영문은 <b>비워두면 자동 번역</b>, 직접 입력하면 그대로 사용됩니다. (사용자 페이지에서 한/영 토글)
         </Typography.Paragraph>
 
         <Form form={form} layout="vertical" initialValues={{ priority: 'normal', is_popup: false }}>
           <Form.Item name="title" label="제목" rules={[{ required: true, message: '제목을 입력하세요' }]}>
             <Input placeholder={type === 'guide' ? '가이드 제목' : '공지사항 제목'} />
+          </Form.Item>
+          <Form.Item name="title_en" label="제목 (English · 선택)">
+            <Input placeholder="비워두면 자동 번역됩니다" />
           </Form.Item>
 
           <Form.Item
@@ -323,6 +359,9 @@ export default function AnnouncementsPage() {
               rows={type === 'guide' ? 3 : 6}
               placeholder={type === 'guide' ? '가이드 전체 개요를 간단히 입력 (선택)' : '공지사항 내용'}
             />
+          </Form.Item>
+          <Form.Item name="content_en" label={(type === 'guide' ? '개요' : '내용') + ' (English · 선택)'}>
+            <TextArea rows={type === 'guide' ? 2 : 4} placeholder="비워두면 자동 번역됩니다" />
           </Form.Item>
 
           {type === 'notice' && (
@@ -367,6 +406,13 @@ export default function AnnouncementsPage() {
                       value={step.text}
                       onChange={(e) => updateStep(i, { text: e.target.value })}
                       placeholder={`${i + 1}단계 설명`}
+                      style={{ marginBottom: 8 }}
+                    />
+                    <TextArea
+                      rows={2}
+                      value={step.text_en}
+                      onChange={(e) => updateStep(i, { text_en: e.target.value })}
+                      placeholder={`${i + 1}단계 설명 (English · 선택, 비우면 자동 번역)`}
                       style={{ marginBottom: 8 }}
                     />
                     <Upload
