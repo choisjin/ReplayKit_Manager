@@ -48,13 +48,13 @@ if exist "frontend\dist\index.html" (
 if "%PRODUCTION%"=="1" (
     echo Mode: Production (port 9000)
     echo.
-    %PY% -m uvicorn backend.main:app --host 10.176.144.70 --port 9000
+    %PY% -m uvicorn backend.main:app --host 0.0.0.0 --port 9000
 ) else (
     echo Mode: Development
     echo   Backend:  port 9000
     echo   Frontend: port 9001 (run separately: cd frontend ^&^& npm run dev)
     echo.
-    %PY% -m uvicorn backend.main:app --host 10.176.144.70 --port 9000 --reload
+    %PY% -m uvicorn backend.main:app --host 0.0.0.0 --port 9000 --reload
 )
 
 pause
