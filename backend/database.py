@@ -57,7 +57,9 @@ def init_db():
         ("is_popup", "ALTER TABLE announcements ADD COLUMN is_popup INTEGER DEFAULT 0"),
         ("type", "ALTER TABLE announcements ADD COLUMN type TEXT DEFAULT 'notice'"),  # 'notice' | 'guide'
         ("images", "ALTER TABLE announcements ADD COLUMN images TEXT"),  # JSON: data URL 목록
-        ("steps", "ALTER TABLE announcements ADD COLUMN steps TEXT"),    # JSON: [{text, image}]
+        ("steps", "ALTER TABLE announcements ADD COLUMN steps TEXT"),    # JSON: [{text, text_en, image}]
+        ("title_en", "ALTER TABLE announcements ADD COLUMN title_en TEXT"),    # 영문 제목(선택)
+        ("content_en", "ALTER TABLE announcements ADD COLUMN content_en TEXT"),  # 영문 내용/개요(선택)
     ]
     for col, ddl in migrations:
         if col not in cols:
@@ -93,15 +95,17 @@ async def create_announcement(
     type: str = "notice",
     images: str | None = None,  # JSON 문자열
     steps: str | None = None,   # JSON 문자열
+    title_en: str | None = None,
+    content_en: str | None = None,
 ) -> dict:
     def _run():
         conn = get_conn()
         now = _now()
         cur = conn.execute(
             "INSERT INTO announcements "
-            "(title, content, priority, active, image_data, is_popup, type, images, steps, created_at, updated_at) "
-            "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)",
-            (title, content, priority, image_data, is_popup, type, images, steps, now, now),
+            "(title, content, priority, active, image_data, is_popup, type, images, steps, title_en, content_en, created_at, updated_at) "
+            "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (title, content, priority, image_data, is_popup, type, images, steps, title_en, content_en, now, now),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM announcements WHERE id=?", (cur.lastrowid,)).fetchone()
@@ -126,7 +130,7 @@ async def update_announcement(ann_id: int, **kwargs) -> dict | None:
         sets = []
         vals = []
         for k, v in kwargs.items():
-            if k in ("title", "content", "priority", "active", "image_data", "is_popup", "type", "images", "steps"):
+            if k in ("title", "content", "priority", "active", "image_data", "is_popup", "type", "images", "steps", "title_en", "content_en"):
                 sets.append(f"{k}=?")
                 vals.append(v)
         if not sets:

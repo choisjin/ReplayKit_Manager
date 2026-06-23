@@ -27,6 +27,35 @@ from . import database as db
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# ==================== 자동 번역 (한 → 영) ====================
+# deep-translator 미설치/오프라인이어도 앱은 정상 동작(영문 비우고 한국어로 폴백).
+try:
+    from deep_translator import GoogleTranslator
+    _TRANSLATOR_OK = True
+except Exception as _e:  # pragma: no cover
+    _TRANSLATOR_OK = False
+    logger.warning("deep-translator 사용 불가 — 자동 번역 비활성화: %s", _e)
+
+
+def _translate_en_sync(text: str) -> str:
+    text = (text or "").strip()
+    if not text or not _TRANSLATOR_OK:
+        return ""
+    try:
+        # 5000자 제한 대비 잘라서 호출
+        return GoogleTranslator(source="auto", target="en").translate(text[:4900]) or ""
+    except Exception as e:
+        logger.warning("자동 번역 실패: %s", e)
+        return ""
+
+
+async def _auto_en(source_text: str, provided_en: str | None) -> str:
+    """영문이 직접 입력돼 있으면 그대로, 없으면 한국어를 자동 번역."""
+    provided = (provided_en or "").strip()
+    if provided:
+        return provided
+    return await asyncio.to_thread(_translate_en_sync, source_text)
+
 # 간단 관리자 계정 (하드코딩)
 ADMIN_USER = "admin"
 ADMIN_PASS = "admin"
@@ -145,11 +174,14 @@ async def update_app():
 
 class GuideStep(BaseModel):
     text: str = ""
+    text_en: str = ""            # 영문(선택)
     image: Optional[str] = None  # base64 data URL
 
 class AnnouncementCreate(BaseModel):
     title: str
     content: str = ""
+    title_en: str = ""           # 영문 제목(선택)
+    content_en: str = ""         # 영문 내용/개요(선택)
     priority: str = "normal"  # normal, important, urgent
     type: str = "notice"      # 'notice'(일반 공지/안내) | 'guide'(단계별 가이드)
     is_popup: int = 0         # 1이면 사용자 화면 진입 시 팝업으로 표시
@@ -159,6 +191,8 @@ class AnnouncementCreate(BaseModel):
 class AnnouncementUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
+    title_en: Optional[str] = None
+    content_en: Optional[str] = None
     priority: Optional[str] = None
     active: Optional[int] = None
     type: Optional[str] = None
@@ -183,7 +217,18 @@ async def get_announcements(active_only: bool = False):
 @app.post("/api/announcements")
 async def create_announcement(req: AnnouncementCreate):
     images = req.images or []
-    steps = [s.model_dump() for s in (req.steps or [])]
+    src_steps = req.steps or []
+    # 제목/내용/단계 텍스트를 동시에 자동 번역
+    title_en, content_en, *step_ens = await asyncio.gather(
+        _auto_en(req.title, req.title_en),
+        _auto_en(req.content, req.content_en),
+        *[_auto_en(s.text, s.text_en) for s in src_steps],
+    )
+    steps = []
+    for s, ten in zip(src_steps, step_ens):
+        d = s.model_dump()
+        d["text_en"] = ten
+        steps.append(d)
     ann = await db.create_announcement(
         req.title,
         req.content,
@@ -193,6 +238,8 @@ async def create_announcement(req: AnnouncementCreate):
         type=req.type,
         images=json.dumps(images, ensure_ascii=False),
         steps=json.dumps(steps, ensure_ascii=False),
+        title_en=title_en,
+        content_en=content_en,
     )
     # 새 공지 알림을 연결된 클라이언트에게 전파
     await _broadcast_announcement_update()
@@ -203,6 +250,17 @@ async def update_announcement(ann_id: int, req: AnnouncementUpdate):
     data = req.model_dump(exclude_none=True)
     images = data.get("images")
     steps = data.get("steps")  # list[dict] (model_dump 변환됨)
+    # 한국어 본문이 갱신되면 영문도 자동 재번역(영문이 직접 들어온 경우는 존중)
+    if "title" in data:
+        data["title_en"] = await _auto_en(data["title"], data.get("title_en"))
+    if "content" in data:
+        data["content_en"] = await _auto_en(data["content"], data.get("content_en"))
+    if steps is not None:
+        step_ens = await asyncio.gather(
+            *[_auto_en(d.get("text", ""), d.get("text_en")) for d in steps]
+        )
+        for d, ten in zip(steps, step_ens):
+            d["text_en"] = ten
     # 이미지/단계가 갱신되면 단일 image_data(하위호환)도 재계산
     if images is not None or steps is not None:
         data["image_data"] = _first_image(images or [], steps or [])

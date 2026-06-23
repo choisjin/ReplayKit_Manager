@@ -294,7 +294,7 @@ export default function AnnouncementsPage() {
         width={680}
         styles={{ body: { maxHeight: '70vh', overflowY: 'auto' } }}
       >
-        <div style={{ marginBottom: 16 }}>
+        <div style={{ marginBottom: 8 }}>
           <Segmented
             block
             value={type}
@@ -305,6 +305,9 @@ export default function AnnouncementsPage() {
             ]}
           />
         </div>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 16 }}>
+          한국어로 작성하면 영문 페이지는 <b>자동 번역</b>되어 제공됩니다. (사용자 페이지에서 한/영 토글)
+        </Typography.Paragraph>
 
         <Form form={form} layout="vertical" initialValues={{ priority: 'normal', is_popup: false }}>
           <Form.Item name="title" label="제목" rules={[{ required: true, message: '제목을 입력하세요' }]}>
