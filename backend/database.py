@@ -49,18 +49,31 @@ def init_db():
             FOREIGN KEY (room_id) REFERENCES chat_rooms(id)
         );
     """)
+    # 마이그레이션: 기존 announcements 테이블에 신규 컬럼 추가
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(announcements)").fetchall()}
+    if "image_data" not in cols:
+        conn.execute("ALTER TABLE announcements ADD COLUMN image_data TEXT")
+    if "is_popup" not in cols:
+        conn.execute("ALTER TABLE announcements ADD COLUMN is_popup INTEGER DEFAULT 0")
     conn.commit()
     conn.close()
 
 # --- 공지사항 ---
 
-async def create_announcement(title: str, content: str, priority: str = "normal") -> dict:
+async def create_announcement(
+    title: str,
+    content: str,
+    priority: str = "normal",
+    image_data: str | None = None,
+    is_popup: int = 0,
+) -> dict:
     def _run():
         conn = get_conn()
         now = _now()
         cur = conn.execute(
-            "INSERT INTO announcements (title, content, priority, active, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)",
-            (title, content, priority, now, now),
+            "INSERT INTO announcements (title, content, priority, active, image_data, is_popup, created_at, updated_at) "
+            "VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
+            (title, content, priority, image_data, is_popup, now, now),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM announcements WHERE id=?", (cur.lastrowid,)).fetchone()
@@ -85,7 +98,7 @@ async def update_announcement(ann_id: int, **kwargs) -> dict | None:
         sets = []
         vals = []
         for k, v in kwargs.items():
-            if k in ("title", "content", "priority", "active"):
+            if k in ("title", "content", "priority", "active", "image_data", "is_popup"):
                 sets.append(f"{k}=?")
                 vals.append(v)
         if not sets:

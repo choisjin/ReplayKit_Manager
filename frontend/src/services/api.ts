@@ -9,7 +9,7 @@ export const authApi = {
 
 export const announcementApi = {
   list: (activeOnly = false) => api.get('/announcements', { params: { active_only: activeOnly } }),
-  create: (data: { title: string; content: string; priority: string }) => api.post('/announcements', data),
+  create: (data: Record<string, unknown>) => api.post('/announcements', data),
   update: (id: number, data: Record<string, unknown>) => api.put(`/announcements/${id}`, data),
   delete: (id: number) => api.delete(`/announcements/${id}`),
 };

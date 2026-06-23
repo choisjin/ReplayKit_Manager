@@ -4,8 +4,14 @@ import { BulbOutlined, BulbFilled, LogoutOutlined, NotificationOutlined, Message
 import AnnouncementsPage from './pages/AnnouncementsPage';
 import ChatPage from './pages/ChatPage';
 import LoginPage from './pages/LoginPage';
+import PublicViewPage from './pages/PublicViewPage';
 
 const { Sider, Content, Header } = Layout;
+
+// 로그인 없이 접근하는 공개 경로
+function isPublicView() {
+  return window.location.pathname.replace(/\/+$/, '') === '/view';
+}
 
 function AppContent() {
   const [activeKey, setActiveKey] = useState('announcements');
@@ -94,5 +100,15 @@ function AppContent() {
 }
 
 export default function App() {
+  // 공개 읽기 전용 페이지: 로그인 불필요, 밝은 테마
+  if (isPublicView()) {
+    return (
+      <ConfigProvider theme={{ algorithm: theme.defaultAlgorithm }}>
+        <AntdApp>
+          <PublicViewPage />
+        </AntdApp>
+      </ConfigProvider>
+    );
+  }
   return <AppContent />;
 }

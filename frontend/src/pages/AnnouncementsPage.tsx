@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Button, Card, Form, Input, message, Modal, Select, Space, Switch, Table, Tag, Typography } from 'antd';
-import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
+import { Button, Form, Image, Input, message, Modal, Select, Space, Switch, Table, Tag, Typography, Upload } from 'antd';
+import type { UploadFile } from 'antd';
+import { PlusOutlined, EditOutlined, DeleteOutlined, UploadOutlined, LinkOutlined } from '@ant-design/icons';
 import { announcementApi } from '../services/api';
 
 const { TextArea } = Input;
+
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // 2MB
 
 interface Announcement {
   id: number;
@@ -11,6 +14,8 @@ interface Announcement {
   content: string;
   priority: string;
   active: number;
+  image_data: string | null;
+  is_popup: number;
   created_at: string;
   updated_at: string;
 }
@@ -20,7 +25,10 @@ export default function AnnouncementsPage() {
   const [loading, setLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Announcement | null>(null);
+  const [imageData, setImageData] = useState<string | null>(null);
   const [form] = Form.useForm();
+
+  const publicUrl = `${window.location.origin}/view`;
 
   const fetchData = async () => {
     setLoading(true);
@@ -35,19 +43,50 @@ export default function AnnouncementsPage() {
 
   useEffect(() => { fetchData(); }, []);
 
+  const openCreate = () => {
+    setEditing(null);
+    setImageData(null);
+    form.resetFields();
+    setModalOpen(true);
+  };
+
+  const openEdit = (record: Announcement) => {
+    setEditing(record);
+    setImageData(record.image_data || null);
+    form.setFieldsValue({
+      title: record.title,
+      content: record.content,
+      priority: record.priority,
+      is_popup: !!record.is_popup,
+    });
+    setModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setModalOpen(false);
+    setEditing(null);
+    setImageData(null);
+    form.resetFields();
+  };
+
   const handleSubmit = async () => {
     const values = await form.validateFields();
+    const payload = {
+      title: values.title,
+      content: values.content,
+      priority: values.priority,
+      is_popup: values.is_popup ? 1 : 0,
+      image_data: imageData ?? '', // '' = 이미지 제거
+    };
     try {
       if (editing) {
-        await announcementApi.update(editing.id, values);
+        await announcementApi.update(editing.id, payload);
         message.success('수정 완료');
       } else {
-        await announcementApi.create(values);
+        await announcementApi.create(payload);
         message.success('등록 완료');
       }
-      setModalOpen(false);
-      form.resetFields();
-      setEditing(null);
+      closeModal();
       fetchData();
     } catch {
       message.error('저장 실패');
@@ -69,6 +108,26 @@ export default function AnnouncementsPage() {
     fetchData();
   };
 
+  // 파일 선택 → base64 변환 (자동 업로드 막고 클라이언트에서 인코딩)
+  const beforeUpload = (file: File) => {
+    if (!file.type.startsWith('image/')) {
+      message.error('이미지 파일만 첨부할 수 있습니다');
+      return Upload.LIST_IGNORE;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      message.error('이미지는 2MB 이하만 가능합니다');
+      return Upload.LIST_IGNORE;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setImageData(reader.result as string);
+    reader.readAsDataURL(file);
+    return false;
+  };
+
+  const uploadList: UploadFile[] = imageData
+    ? [{ uid: '-1', name: 'image', status: 'done', url: imageData }]
+    : [];
+
   const priorityColor: Record<string, string> = {
     urgent: 'red',
     important: 'orange',
@@ -87,8 +146,21 @@ export default function AnnouncementsPage() {
       width: 90,
       render: (v: string) => <Tag color={priorityColor[v]}>{priorityLabel[v] || v}</Tag>,
     },
+    {
+      title: '이미지',
+      dataIndex: 'image_data',
+      width: 70,
+      render: (v: string | null) =>
+        v ? <Image src={v} width={40} height={40} style={{ objectFit: 'cover', borderRadius: 4 }} /> : <span style={{ color: '#888' }}>-</span>,
+    },
     { title: '제목', dataIndex: 'title', ellipsis: true },
     { title: '내용', dataIndex: 'content', ellipsis: true },
+    {
+      title: '팝업',
+      dataIndex: 'is_popup',
+      width: 70,
+      render: (v: number) => (v ? <Tag color="purple">팝업</Tag> : null),
+    },
     {
       title: '활성',
       dataIndex: 'active',
@@ -108,11 +180,7 @@ export default function AnnouncementsPage() {
       width: 100,
       render: (_: unknown, record: Announcement) => (
         <Space>
-          <Button size="small" icon={<EditOutlined />} onClick={() => {
-            setEditing(record);
-            form.setFieldsValue(record);
-            setModalOpen(true);
-          }} />
+          <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(record)} />
           <Button size="small" danger icon={<DeleteOutlined />} onClick={() => {
             Modal.confirm({
               title: '삭제 확인',
@@ -127,16 +195,23 @@ export default function AnnouncementsPage() {
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <Typography.Title level={4} style={{ margin: 0 }}>공지사항 관리</Typography.Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => {
-          setEditing(null);
-          form.resetFields();
-          setModalOpen(true);
-        }}>
-          새 공지 등록
-        </Button>
+        <Space>
+          <Button icon={<LinkOutlined />} onClick={() => window.open(publicUrl, '_blank')}>
+            공개 페이지 열기
+          </Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+            새 공지 등록
+          </Button>
+        </Space>
       </div>
+
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
+        사용자에게 보여줄 공개 주소:{' '}
+        <Typography.Text copyable code>{publicUrl}</Typography.Text>
+        {' '}— 활성화된 공지가 읽기 전용 게시판으로 표시되고, "팝업" 지정 시 사용자 접속 시 자동으로 떠오릅니다.
+      </Typography.Paragraph>
 
       <Table
         dataSource={data}
@@ -151,17 +226,34 @@ export default function AnnouncementsPage() {
         title={editing ? '공지사항 수정' : '새 공지사항 등록'}
         open={modalOpen}
         onOk={handleSubmit}
-        onCancel={() => { setModalOpen(false); setEditing(null); form.resetFields(); }}
+        onCancel={closeModal}
         okText={editing ? '수정' : '등록'}
         cancelText="취소"
         width={600}
       >
-        <Form form={form} layout="vertical" initialValues={{ priority: 'normal' }}>
+        <Form form={form} layout="vertical" initialValues={{ priority: 'normal', is_popup: false }}>
           <Form.Item name="title" label="제목" rules={[{ required: true, message: '제목을 입력하세요' }]}>
             <Input placeholder="공지사항 제목" />
           </Form.Item>
           <Form.Item name="content" label="내용" rules={[{ required: true, message: '내용을 입력하세요' }]}>
             <TextArea rows={6} placeholder="공지사항 내용" />
+          </Form.Item>
+          <Form.Item label="이미지 (선택, 2MB 이하)">
+            <Upload
+              listType="picture-card"
+              fileList={uploadList}
+              beforeUpload={beforeUpload}
+              onRemove={() => setImageData(null)}
+              maxCount={1}
+              accept="image/*"
+            >
+              {imageData ? null : (
+                <div>
+                  <UploadOutlined />
+                  <div style={{ marginTop: 8 }}>업로드</div>
+                </div>
+              )}
+            </Upload>
           </Form.Item>
           <Form.Item name="priority" label="우선순위">
             <Select>
@@ -169,6 +261,9 @@ export default function AnnouncementsPage() {
               <Select.Option value="important">중요</Select.Option>
               <Select.Option value="urgent">긴급</Select.Option>
             </Select>
+          </Form.Item>
+          <Form.Item name="is_popup" label="사용자 접속 시 팝업으로 표시" valuePropName="checked">
+            <Switch />
           </Form.Item>
         </Form>
       </Modal>

@@ -61,12 +61,16 @@ class AnnouncementCreate(BaseModel):
     title: str
     content: str
     priority: str = "normal"  # normal, important, urgent
+    image_data: Optional[str] = None  # base64 data URL (선택)
+    is_popup: int = 0  # 1이면 사용자 화면 진입 시 팝업으로 표시
 
 class AnnouncementUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     priority: Optional[str] = None
     active: Optional[int] = None
+    image_data: Optional[str] = None
+    is_popup: Optional[int] = None
 
 @app.get("/api/announcements")
 async def get_announcements(active_only: bool = False):
@@ -74,7 +78,9 @@ async def get_announcements(active_only: bool = False):
 
 @app.post("/api/announcements")
 async def create_announcement(req: AnnouncementCreate):
-    ann = await db.create_announcement(req.title, req.content, req.priority)
+    ann = await db.create_announcement(
+        req.title, req.content, req.priority, req.image_data, req.is_popup
+    )
     # 새 공지 알림을 연결된 클라이언트에게 전파
     await _broadcast_announcement_update()
     return ann
