@@ -13,7 +13,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 # 마지막 보고 후 이 시간(초)이 지나면 WS 가 살아있어도 오프라인으로 간주.
-OFFLINE_AFTER_SEC = 20.0
+# 재생 중 이벤트 루프가 잠깐 바빠 status_update 가 지연돼도 오프라인으로 깜빡이지 않도록 넉넉히.
+# (2초 주기 보고 기준 20여 회 누락까지 허용. 진짜 다운은 WS 끊김으로 즉시 오프라인 처리됨)
+OFFLINE_AFTER_SEC = 45.0
 
 
 def _now_iso() -> str:
