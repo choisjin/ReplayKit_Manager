@@ -122,24 +122,36 @@ class AgentRegistry:
     def _public_view(self, st: dict) -> dict:
         """대시보드 카드용 경량 뷰 (무거운 usage_stats 제외)."""
         pb = st.get("playback")
+        ui = st.get("ui") or {}
+        all_devices = st.get("devices", []) or []
+
+        # #test 모드에서만 UI 에 노출되는 실험 모듈(test_only)은 관제에서도 같은 규칙을 따른다 —
+        # 사용자 화면엔 없는 모듈을 관제에만 띄우면 실제 구성과 어긋나 보이기 때문.
+        # 모드를 모를 때(브라우저 미접속 등)도 일반 모드와 동일하게 숨긴다.
+        if (ui.get("mode") or "") == "test":
+            devices = all_devices
+        else:
+            devices = [d for d in all_devices if not (d or {}).get("test_only")]
+
         return {
             "client_id": st.get("client_id"),
             "name": st.get("name", ""),
             "ip": st.get("ip", ""),
             "version": st.get("version", ""),
             # OS 는 에이전트가 보고하지 않는다 — Common 디바이스 모듈(CMD/SHELL)로 추정.
-            "os": _derive_os(st.get("devices")),
+            # (필터 전 전체 목록으로 판별 — 실험 모듈 숨김과 무관하게 항상 동일한 결과)
+            "os": _derive_os(all_devices),
             "online": self._is_online(st),
             "last_seen": st.get("last_seen"),
             "activity": st.get("activity", "idle"),
-            "devices": st.get("devices", []),
-            "device_count": len(st.get("devices", [])),
+            "devices": devices,
+            "device_count": len(devices),
             "connected_device_count": sum(
-                1 for d in st.get("devices", []) if d.get("status") == "connected"
+                1 for d in devices if d.get("status") == "connected"
             ),
             "playback": pb,
             "scenario_count": st.get("scenario_count", 0),
-            "ui": st.get("ui") or {},   # {mode, page} — 빈 값이면 브라우저 미접속
+            "ui": ui,   # {mode, page} — 빈 값이면 브라우저 미접속
         }
 
     def get_all(self) -> list[dict]:
