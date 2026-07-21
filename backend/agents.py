@@ -32,17 +32,25 @@ def _parse_iso(s: str | None) -> datetime | None:
 
 
 def _derive_os(devices: list | None) -> str:
-    """Common 디바이스의 모듈명으로 OS 를 추정한다.
+    """기본 디바이스의 OS 별 차이로 OS 를 추정한다 (에이전트가 시스템 정보를 보내지 않음).
 
-    ReplayKit 은 기본 Common 디바이스를 OS 별로 다른 모듈로 등록한다
-    (Windows=CMD, Linux=SHELL). 따라서 에이전트가 별도 시스템 정보를 보내지 않아도
-    이 값만으로 구분할 수 있다. 판별 불가면 빈 문자열(표기 생략).
+    ReplayKit 이 자동 등록하는 두 디바이스가 OS 에 따라 다르게 잡힌다:
+      1) Common 디바이스의 모듈 — Windows=CMD, Linux=SHELL
+      2) 창 제어 디바이스의 표시명 — Windows="WinControl", Linux="LinuxControl"
+         (device_id/type 은 OS 공통으로 "WinControl"/"wincontrol" 고정, 표시명만 갈림)
+    둘 중 먼저 확인되는 신호를 쓴다. 판별 불가면 빈 문자열(표기 생략).
     """
     for d in devices or []:
-        module = str((d or {}).get("module") or "").upper()
+        d = d or {}
+        module = str(d.get("module") or "").upper()
         if module == "SHELL":
             return "Linux"
         if module == "CMD":
+            return "Windows"
+        name = str(d.get("name") or "")
+        if name == "LinuxControl":
+            return "Linux"
+        if name == "WinControl":
             return "Windows"
     return ""
 

@@ -11,10 +11,12 @@ interface DeviceInfo {
 /** 디바이스 표시명.
  *  - auxiliary(모듈·시리얼): 연결된 **모듈명**(CMD·SHELL·OCR·Frame_Check…).
  *    Common/OCR/Frame_Check 는 name 이 전부 "Common" 이라 구분이 안 되기 때문.
+ *    모듈이 없는 auxiliary(WinControl 등)는 **name** 을 쓴다 — device_id 는 OS 공통으로
+ *    "WinControl" 로 고정돼 있고 표시명만 OS 별로 갈리기 때문(Linux=LinuxControl).
  *  - primary(ADB 등 물리 디바이스): **모델 기준 이름**(device_id, 예: "Europe_New_1").
  *    dev.name 은 ADB 가 보고한 모델명(예: "AIVI2_N_FULL")이라 카탈로그 모델과 달라 혼동된다. */
 function deviceLabel(d: DeviceInfo): string {
-  if (d.category === 'auxiliary' && d.module) return d.module;
+  if (d.category === 'auxiliary') return d.module || d.name || d.device_id;
   return d.device_id || d.device_model || d.name;
 }
 interface Playback {
