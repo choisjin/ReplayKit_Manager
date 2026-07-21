@@ -3,7 +3,14 @@ import { Badge, Card, Col, Empty, Progress, Row, Statistic, Tag, Tooltip, Typogr
 import { DesktopOutlined, PlayCircleOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import { agentApi } from '../services/api';
 
-interface DeviceInfo { device_id: string; name: string; type: string; status: string; }
+interface DeviceInfo { device_id: string; name: string; module?: string; type: string; status: string; }
+
+/** 디바이스 표시명 — 연결된 모듈명을 우선 표시한다.
+ *  Common/OCR/Frame_Check 디바이스는 name 이 전부 "Common" 이라 구분이 안 되므로
+ *  module(CMD·SHELL·OCR·Frame_Check…)을 쓰고, 모듈이 없는 물리 디바이스는 name 으로 폴백. */
+function deviceLabel(d: DeviceInfo): string {
+  return d.module || d.name || d.device_id;
+}
 interface Playback {
   scenario_name: string;
   current_cycle: number;
@@ -124,9 +131,11 @@ export default function FleetPage() {
                       <Tag>{a.connected_device_count}/{a.device_count} 연결</Tag>
                       <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 3, marginTop: 3 }}>
                         {a.devices.map(d => (
-                          <Tag key={d.device_id} color={d.status === 'connected' ? 'green' : 'default'} style={{ fontSize: 10, margin: 0 }}>
-                            {d.name || d.device_id}
-                          </Tag>
+                          <Tooltip key={d.device_id} title={`${d.device_id} · ${d.type} · ${d.status}`}>
+                            <Tag color={d.status === 'connected' ? 'green' : 'default'} style={{ fontSize: 10, margin: 0 }}>
+                              {deviceLabel(d)}
+                            </Tag>
+                          </Tooltip>
                         ))}
                       </span>
                     </div>

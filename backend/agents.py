@@ -63,7 +63,11 @@ class AgentRegistry:
         st["devices"] = msg.get("devices", []) or []
         st["playback"] = msg.get("playback")  # None 이면 재생 안 함
         st["scenario_count"] = len(msg.get("scenarios", []) or [])
-        st["usage_stats"] = msg.get("usage_stats")  # 라이브 집계용 (compact)
+        # usage_stats 는 값이 바뀌었을 때만(약 60초 주기) 전송된다 — 대역폭 절감.
+        # 키가 아예 없으면 "변경 없음"이므로 **마지막 값을 그대로 유지**한다.
+        # (msg.get() 으로 덮어쓰면 매 tick None 이 되어 함수통계가 사라진다)
+        if "usage_stats" in msg:
+            st["usage_stats"] = msg["usage_stats"]
 
     def mark_offline(self, client_id: str) -> None:
         st = self._agents.get(client_id)
