@@ -87,6 +87,8 @@ class AgentRegistry:
         st["devices"] = msg.get("devices", []) or []
         st["playback"] = msg.get("playback")  # None 이면 재생 안 함
         st["scenario_count"] = len(msg.get("scenarios", []) or [])
+        # 현재 UI 모드(#test/#admin/#stats/normal)와 페이지. 브라우저가 닫혀 있으면 빈 값.
+        st["ui"] = msg.get("ui") or {}
         # usage_stats 는 값이 바뀌었을 때만(약 60초 주기) 전송된다 — 대역폭 절감.
         # 키가 아예 없으면 "변경 없음"이므로 **마지막 값을 그대로 유지**한다.
         # (msg.get() 으로 덮어쓰면 매 tick None 이 되어 함수통계가 사라진다)
@@ -97,6 +99,14 @@ class AgentRegistry:
         st = self._agents.get(client_id)
         if st:
             st["connected"] = False
+
+    def remove(self, client_id: str) -> bool:
+        """레지스트리에서 에이전트를 제거한다 (오래된/중복 카드 정리용).
+
+        지운 뒤에도 해당 PC 가 다시 접속하면 register 로 자동 재등록되므로 안전하다.
+        머신 UID 가 바뀌어(예: OS 재설치, 식별자 소스 변경) 같은 PC 가 두 개로 보일 때 사용.
+        """
+        return self._agents.pop(client_id, None) is not None
 
     # ---- 조회 ----
 
@@ -129,6 +139,7 @@ class AgentRegistry:
             ),
             "playback": pb,
             "scenario_count": st.get("scenario_count", 0),
+            "ui": st.get("ui") or {},   # {mode, page} — 빈 값이면 브라우저 미접속
         }
 
     def get_all(self) -> list[dict]:

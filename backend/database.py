@@ -272,6 +272,16 @@ async def upsert_agent_usage(client_id: str, host: str, ip: str,
         conn.close()
     await asyncio.to_thread(_run)
 
+async def delete_agent_usage(client_id: str) -> bool:
+    """에이전트의 함수통계 스냅샷을 삭제 (오래된/중복 카드 정리용)."""
+    def _run():
+        conn = get_conn()
+        cur = conn.execute("DELETE FROM agent_usage WHERE client_id=?", (client_id,))
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
+    return await asyncio.to_thread(_run)
+
 async def list_agent_usage() -> list[dict]:
     """저장된 모든 PC의 usage-stats 스냅샷을 반환 (usage_json 파싱)."""
     def _run():

@@ -598,6 +598,21 @@ async def api_agent_detail(client_id: str):
     raise HTTPException(status_code=404, detail="에이전트를 찾을 수 없습니다")
 
 
+@app.delete("/api/agents/{client_id}")
+async def api_agent_delete(client_id: str):
+    """관제 목록에서 에이전트 제거 (오래된/중복 카드 정리).
+
+    머신 UID 가 바뀌면(OS 재설치, 식별자 소스 변경 등) 같은 PC 가 두 개로 보인다.
+    삭제해도 해당 PC 가 다시 접속하면 자동 재등록되므로 안전하다.
+    라이브 상태와 저장된 함수통계 스냅샷을 함께 지운다.
+    """
+    removed = agents.registry.remove(client_id)
+    await db.delete_agent_usage(client_id)
+    _last_usage_gen.pop(client_id, None)
+    logger.info("에이전트 삭제: %s (live=%s)", client_id, removed)
+    return {"status": "ok", "removed": removed}
+
+
 @app.websocket("/ws/client")
 async def ws_client(ws: WebSocket):
     """ReplayKit 테스트 PC(에이전트) 연결 — 상태 수신 전용 (모니터링만, 원격제어 미노출).

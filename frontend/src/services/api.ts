@@ -26,6 +26,7 @@ export const agentApi = {
   list: () => api.get('/agents'),
   functionStats: () => api.get('/agents/function-stats'),
   detail: (clientId: string) => api.get(`/agents/${encodeURIComponent(clientId)}`),
+  remove: (clientId: string) => api.delete(`/agents/${encodeURIComponent(clientId)}`),
 };
 
 export const chatApi = {

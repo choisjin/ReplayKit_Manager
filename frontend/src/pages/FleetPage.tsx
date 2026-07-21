@@ -1,12 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
-import { Badge, Card, Col, Empty, Progress, Row, Statistic, Tag, Tooltip, Typography } from 'antd';
-import { DesktopOutlined, PlayCircleOutlined, VideoCameraOutlined } from '@ant-design/icons';
+import { Badge, Button, Card, Col, Empty, Modal, Progress, Row, Statistic, Tag, Tooltip, Typography, message } from 'antd';
+import { DeleteOutlined, DesktopOutlined, PlayCircleOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import { agentApi } from '../services/api';
 
 interface DeviceInfo {
   device_id: string; name: string; module?: string; device_model?: string;
   category?: string; type: string; status: string; raw_status?: string;
+  test_only?: boolean;   // #test 모드에서만 UI 에 노출되는 실험 모듈
 }
+interface UiState { mode?: string; page?: string; }
+
+// UI 모드 — ReplayKit 의 URL hash 게이트. 모드마다 노출되는 모듈이 다르다.
+const MODE_LABEL: Record<string, string> = {
+  test: '#test', admin: '#admin', stats: '#stats', normal: '일반',
+};
+const MODE_COLOR: Record<string, string> = {
+  test: 'purple', admin: 'orange', stats: 'cyan', normal: 'default',
+};
+// 현재 보고 있는 페이지 (App.tsx 의 activeKey)
+const PAGE_LABEL: Record<string, string> = {
+  '/': '디바이스', '/record': '녹화', '/scenarios': '시나리오', '/results': '결과',
+  '/settings': '설정', '/changelog': '변경이력', '/admin': '관리자', '/stats': '통계',
+};
 
 /** 디바이스 표시명.
  *  - auxiliary(모듈·시리얼): 연결된 **모듈명**(CMD·SHELL·OCR·Frame_Check…).
@@ -46,6 +61,7 @@ interface Agent {
   connected_device_count: number;
   playback: Playback | null;
   scenario_count: number;
+  ui?: UiState;
 }
 interface Summary { total: number; online: number; playing: number; recording: number; }
 
@@ -90,6 +106,31 @@ export default function FleetPage() {
     return () => { if (timer.current) window.clearInterval(timer.current); };
   }, []);
 
+  const removeAgent = (a: Agent) => {
+    Modal.confirm({
+      title: '관제 목록에서 제거',
+      content: (
+        <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+          <b>{a.name || a.client_id}</b> 를 목록에서 제거합니다.<br />
+          저장된 함수통계 스냅샷도 함께 삭제됩니다.<br />
+          <span style={{ color: '#888' }}>
+            해당 PC 가 다시 접속하면 자동으로 재등록됩니다.
+          </span>
+        </div>
+      ),
+      okText: '제거', okType: 'danger', cancelText: '취소',
+      onOk: async () => {
+        try {
+          await agentApi.remove(a.client_id);
+          message.success('제거되었습니다');
+          load();
+        } catch (e: any) {
+          message.error('제거 실패: ' + (e?.response?.data?.detail || e?.message || ''));
+        }
+      },
+    });
+  };
+
   return (
     <div>
       <Typography.Title level={4} style={{ marginTop: 0 }}>
@@ -133,7 +174,23 @@ export default function FleetPage() {
                       )}
                     </span>
                   }
-                  extra={<Tag color={ACTIVITY_COLOR[a.activity] || 'default'}>{ACTIVITY_LABEL[a.activity] || a.activity}</Tag>}
+                  extra={
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <Tag color={ACTIVITY_COLOR[a.activity] || 'default'} style={{ marginRight: 0 }}>
+                        {ACTIVITY_LABEL[a.activity] || a.activity}
+                      </Tag>
+                      {/* 오프라인 카드만 삭제 가능 — 머신 UID 변경(OS 재설치 등)으로 생긴
+                          중복/유령 카드 정리용. 해당 PC 가 다시 접속하면 자동 재등록된다. */}
+                      {!a.online && (
+                        <Tooltip title="목록에서 제거 (다시 접속하면 재등록)">
+                          <Button
+                            type="text" size="small" danger icon={<DeleteOutlined />}
+                            onClick={() => removeAgent(a)}
+                          />
+                        </Tooltip>
+                      )}
+                    </span>
+                  }
                   style={{ opacity: a.online ? 1 : 0.6 }}
                 >
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12 }}>
@@ -141,6 +198,23 @@ export default function FleetPage() {
                       <Tooltip title={`머신 UID: ${a.client_id}`}><span>IP {a.ip || '-'}</span></Tooltip>
                       <span>{a.online ? '온라인' : `오프라인 · ${relTime(a.last_seen)}`}</span>
                     </div>
+
+                    {/* 현재 UI 모드 / 보고 있는 페이지 — 모드마다 노출 모듈이 달라 구분이 필요 */}
+                    {a.online && a.ui?.mode && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <Typography.Text type="secondary">화면 </Typography.Text>
+                        <Tooltip title="ReplayKit UI 의 URL hash 모드 (#test 는 실험 모듈이 추가로 노출됨)">
+                          <Tag color={MODE_COLOR[a.ui.mode] || 'default'} style={{ fontSize: 10, margin: 0 }}>
+                            {MODE_LABEL[a.ui.mode] || a.ui.mode}
+                          </Tag>
+                        </Tooltip>
+                        {a.ui.page && (
+                          <Tag style={{ fontSize: 10, margin: 0 }}>
+                            {PAGE_LABEL[a.ui.page] || a.ui.page}
+                          </Tag>
+                        )}
+                      </div>
+                    )}
 
                     {/* 연결 디바이스 */}
                     <div>
@@ -155,9 +229,18 @@ export default function FleetPage() {
                               d.device_model && `모델: ${d.device_model}`,
                               d.name && d.name !== d.device_id && `ADB명: ${d.name}`,
                               `${d.type} · ${d.raw_status || d.status}`,
+                              d.test_only && '#test 모드에서만 노출되는 실험 모듈',
                             ].filter(Boolean).join(' · ')}
                           >
-                            <Tag color={d.status === 'connected' ? 'green' : 'default'} style={{ fontSize: 10, margin: 0 }}>
+                            <Tag
+                              color={d.test_only ? 'purple' : (d.status === 'connected' ? 'green' : 'default')}
+                              style={{
+                                fontSize: 10, margin: 0,
+                                // 실험 모듈은 점선 테두리로 일반 모듈과 한눈에 구분
+                                borderStyle: d.test_only ? 'dashed' : undefined,
+                                opacity: d.status === 'connected' ? 1 : 0.55,
+                              }}
+                            >
                               {deviceLabel(d)}
                             </Tag>
                           </Tooltip>
