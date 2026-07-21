@@ -49,6 +49,18 @@ def init_db():
             created_at TEXT NOT NULL,
             FOREIGN KEY (room_id) REFERENCES chat_rooms(id)
         );
+
+        -- 테스트 PC(에이전트)별 모듈/함수 사용통계 스냅샷.
+        -- 실시간 라이브 상태는 메모리(AgentRegistry)에 두고, 함수통계 스냅샷만 여기 영속화.
+        -- 키는 하드웨어 머신 UID (IP 아님 — IP 는 바뀔 수 있음). PC 당 한 행(최신) upsert.
+        CREATE TABLE IF NOT EXISTS agent_usage (
+            client_id TEXT PRIMARY KEY,   -- 머신 UID
+            host TEXT,                    -- 호스트명(표시용)
+            ip TEXT,                      -- 마지막 보고 IP(표시용)
+            usage_json TEXT,              -- compact usage-stats JSON
+            generated_at TEXT,            -- 시나리오 측 집계 시각
+            updated_at TEXT NOT NULL      -- 서버 저장 시각
+        );
     """)
     # 마이그레이션: 기존 announcements 테이블에 신규 컬럼 추가
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(announcements)").fetchall()}
@@ -239,4 +251,42 @@ async def get_messages(room_id: str, limit: int = 200) -> list[dict]:
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
+    return await asyncio.to_thread(_run)
+
+# --- 에이전트(테스트 PC) 함수통계 스냅샷 ---
+
+async def upsert_agent_usage(client_id: str, host: str, ip: str,
+                             usage_json: str, generated_at: str | None) -> None:
+    """PC별 최신 usage-stats 스냅샷을 저장(upsert). 머신 UID 기준 1행 유지."""
+    def _run():
+        conn = get_conn()
+        conn.execute(
+            "INSERT INTO agent_usage (client_id, host, ip, usage_json, generated_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(client_id) DO UPDATE SET "
+            "host=excluded.host, ip=excluded.ip, usage_json=excluded.usage_json, "
+            "generated_at=excluded.generated_at, updated_at=excluded.updated_at",
+            (client_id, host, ip, usage_json, generated_at, _now()),
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_run)
+
+async def list_agent_usage() -> list[dict]:
+    """저장된 모든 PC의 usage-stats 스냅샷을 반환 (usage_json 파싱)."""
+    def _run():
+        conn = get_conn()
+        rows = conn.execute("SELECT * FROM agent_usage ORDER BY updated_at DESC").fetchall()
+        conn.close()
+        out = []
+        for r in rows:
+            d = dict(r)
+            raw = d.get("usage_json")
+            try:
+                d["usage_stats"] = json.loads(raw) if raw else None
+            except (json.JSONDecodeError, TypeError):
+                d["usage_stats"] = None
+            d.pop("usage_json", None)
+            out.append(d)
+        return out
     return await asyncio.to_thread(_run)

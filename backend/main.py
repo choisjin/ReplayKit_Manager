@@ -553,6 +553,113 @@ async def _broadcast_announcement_update():
             pass
 
 
+# ==================== 테스트 PC 관제 (에이전트) ====================
+# ReplayKit 각 PC 의 MonitorClient 가 /ws/client 로 연결해 2초마다 status_update 를 보낸다.
+# 라이브 상태는 agents.registry(메모리), 함수통계 스냅샷은 db.agent_usage(영속).
+
+from . import agents
+
+# PC별 마지막으로 DB 에 저장한 usage generated_at — 매 2초 write 부하 방지용 스로틀.
+_last_usage_gen: dict[str, str] = {}
+
+
+@app.get("/api/agents")
+async def api_agents():
+    """관제 대상 테스트 PC 목록(라이브 상태)."""
+    return {"agents": agents.registry.get_all(), "summary": agents.registry.summary()}
+
+
+@app.get("/api/agents/function-stats")
+async def api_agents_function_stats():
+    """모든 PC 의 모듈/함수 사용통계 집계 (오프라인 PC 는 DB 스냅샷으로 보강)."""
+    snapshots = await db.list_agent_usage()
+    return agents.registry.aggregate_function_stats(extra_snapshots=snapshots)
+
+
+@app.get("/api/agents/{client_id}")
+async def api_agent_detail(client_id: str):
+    """단일 PC 상세 (usage_stats 포함). 오프라인이면 DB 스냅샷으로 폴백."""
+    one = agents.registry.get_one(client_id)
+    if one:
+        return one
+    # 라이브에 없으면 DB 스냅샷에서 조회
+    for snap in await db.list_agent_usage():
+        if snap.get("client_id") == client_id:
+            return {
+                "client_id": client_id,
+                "name": snap.get("host", ""),
+                "ip": snap.get("ip", ""),
+                "online": False,
+                "playback": None,
+                "devices": [],
+                "usage_stats": snap.get("usage_stats"),
+                "last_seen": snap.get("updated_at"),
+            }
+    raise HTTPException(status_code=404, detail="에이전트를 찾을 수 없습니다")
+
+
+@app.websocket("/ws/client")
+async def ws_client(ws: WebSocket):
+    """ReplayKit 테스트 PC(에이전트) 연결 — 상태 수신 전용 (모니터링만, 원격제어 미노출).
+
+    프로토콜(에이전트 → 서버):
+      1. {type:"register", client_id(머신 UID), name(호스트명), version}
+         ← 서버: {type:"registered"}
+      2. {type:"status_update", activity, devices[], playback{...}, scenarios[], usage_stats{...}}
+    """
+    await ws.accept()
+    ip = ws.client.host if ws.client else ""
+    client_id: str | None = None
+    try:
+        # 첫 메시지: register
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
+        data = json.loads(raw)
+        if data.get("type") != "register" or not data.get("client_id"):
+            await ws.close()
+            return
+        client_id = str(data["client_id"])
+        agents.registry.register(
+            client_id,
+            name=data.get("name", ""),
+            ip=ip,
+            version=data.get("version", ""),
+        )
+        await ws.send_json({"type": "registered", "server": "replaykit-manager"})
+        logger.info("에이전트 등록: %s (%s / %s)", client_id, data.get("name", ""), ip)
+
+        # 상태 수신 루프
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            if msg.get("type") == "status_update":
+                agents.registry.update_status(client_id, msg, ip)
+                # 함수통계 스냅샷 영속화 — generated_at 이 바뀔 때만 저장(2초마다 write 방지)
+                us = msg.get("usage_stats")
+                if us:
+                    gen = us.get("generated_at") or ""
+                    if gen and _last_usage_gen.get(client_id) != gen:
+                        _last_usage_gen[client_id] = gen
+                        try:
+                            await db.upsert_agent_usage(
+                                client_id, msg.get("name", ""), ip,
+                                json.dumps(us, ensure_ascii=False), gen,
+                            )
+                        except Exception as e:
+                            logger.warning("agent_usage 저장 실패(%s): %s", client_id, e)
+            # command_result 등 기타 메시지는 모니터링 단계에선 무시
+
+    except WebSocketDisconnect:
+        logger.info("에이전트 연결 종료: %s", client_id)
+    except Exception as e:
+        logger.warning("에이전트 WS 오류(%s): %s", client_id, e)
+    finally:
+        if client_id:
+            agents.registry.mark_offline(client_id)
+
+
 # ==================== Static files (Admin Frontend) ====================
 
 _FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"

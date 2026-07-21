@@ -22,6 +22,12 @@ export const translateApi = {
   toEn: (texts: string[]) => api.post('/translate', { texts }),
 };
 
+export const agentApi = {
+  list: () => api.get('/agents'),
+  functionStats: () => api.get('/agents/function-stats'),
+  detail: (clientId: string) => api.get(`/agents/${encodeURIComponent(clientId)}`),
+};
+
 export const chatApi = {
   rooms: () => api.get('/chat/rooms'),
   messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),
