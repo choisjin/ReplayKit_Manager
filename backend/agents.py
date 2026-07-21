@@ -60,11 +60,25 @@ class AgentRegistry:
 
     def __init__(self):
         self._agents: dict[str, dict] = {}
+        self._seq = 0   # 최초 등록 순번 — 카드 정렬을 '연결 순서'로 고정하는 데 쓴다
+
+    def _ensure(self, client_id: str) -> dict:
+        """에이전트 항목을 얻거나 새로 만든다. 최초 생성 시 연결 순번(seq)을 부여한다.
+
+        seq 는 한 번 정해지면 바뀌지 않으므로, 온라인/오프라인 전환이나 이름 변경으로
+        대시보드 카드 순서가 뒤바뀌지 않는다(사용자가 위치를 기억할 수 있게).
+        """
+        st = self._agents.get(client_id)
+        if st is None:
+            self._seq += 1
+            st = {"client_id": client_id, "seq": self._seq}
+            self._agents[client_id] = st
+        return st
 
     # ---- 갱신 ----
 
     def register(self, client_id: str, *, name: str, ip: str, version: str) -> None:
-        st = self._agents.setdefault(client_id, {})
+        st = self._ensure(client_id)
         st.update({
             "client_id": client_id,
             "name": name or st.get("name", ""),
@@ -76,7 +90,7 @@ class AgentRegistry:
         })
 
     def update_status(self, client_id: str, msg: dict, ip: str) -> None:
-        st = self._agents.setdefault(client_id, {"client_id": client_id})
+        st = self._ensure(client_id)
         st["name"] = msg.get("name") or st.get("name", "")
         st["version"] = msg.get("version") or st.get("version", "")
         if ip:
@@ -135,6 +149,7 @@ class AgentRegistry:
 
         return {
             "client_id": st.get("client_id"),
+            "seq": st.get("seq") or 0,   # 연결 순서 (카드 정렬 고정용)
             "name": st.get("name", ""),
             "ip": st.get("ip", ""),
             "version": st.get("version", ""),
@@ -155,9 +170,13 @@ class AgentRegistry:
         }
 
     def get_all(self) -> list[dict]:
-        # 온라인 우선, 그다음 호스트명 정렬
+        """전체 에이전트를 **연결 순서(seq)** 로 반환한다.
+
+        온라인 여부로 정렬하면 PC 가 접속/해제될 때마다 카드가 튀어 보기 어렵다.
+        활성/비활성 구분은 프론트가 섹션으로 나눠 표시하고, 각 섹션 내 순서는 이 seq 를 따른다.
+        """
         views = [self._public_view(st) for st in self._agents.values()]
-        views.sort(key=lambda v: (not v["online"], (v["name"] or v["client_id"]).lower()))
+        views.sort(key=lambda v: v.get("seq") or 0)
         return views
 
     def get_one(self, client_id: str) -> dict | None:
