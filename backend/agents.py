@@ -31,6 +31,22 @@ def _parse_iso(s: str | None) -> datetime | None:
         return None
 
 
+def _derive_os(devices: list | None) -> str:
+    """Common 디바이스의 모듈명으로 OS 를 추정한다.
+
+    ReplayKit 은 기본 Common 디바이스를 OS 별로 다른 모듈로 등록한다
+    (Windows=CMD, Linux=SHELL). 따라서 에이전트가 별도 시스템 정보를 보내지 않아도
+    이 값만으로 구분할 수 있다. 판별 불가면 빈 문자열(표기 생략).
+    """
+    for d in devices or []:
+        module = str((d or {}).get("module") or "").upper()
+        if module == "SHELL":
+            return "Linux"
+        if module == "CMD":
+            return "Windows"
+    return ""
+
+
 class AgentRegistry:
     """머신 UID → 라이브 상태(dict) 인메모리 레지스트리."""
 
@@ -93,6 +109,8 @@ class AgentRegistry:
             "name": st.get("name", ""),
             "ip": st.get("ip", ""),
             "version": st.get("version", ""),
+            # OS 는 에이전트가 보고하지 않는다 — Common 디바이스 모듈(CMD/SHELL)로 추정.
+            "os": _derive_os(st.get("devices")),
             "online": self._is_online(st),
             "last_seen": st.get("last_seen"),
             "activity": st.get("activity", "idle"),

@@ -4,18 +4,18 @@ import { DesktopOutlined, PlayCircleOutlined, VideoCameraOutlined } from '@ant-d
 import { agentApi } from '../services/api';
 
 interface DeviceInfo {
-  device_id: string; name: string; module?: string;
-  category?: string; type: string; status: string;
+  device_id: string; name: string; module?: string; device_model?: string;
+  category?: string; type: string; status: string; raw_status?: string;
 }
 
 /** 디바이스 표시명.
- *  - auxiliary(모듈·시리얼): 연결된 **모듈명**을 표시. Common/OCR/Frame_Check 는 name 이
- *    전부 "Common" 이라 구분이 안 되므로 module(CMD·SHELL·OCR·Frame_Check…)을 쓴다.
- *  - primary(ADB/에이전트 등 물리 디바이스): name 이 곧 식별자이므로 **이름을 그대로** 표시.
- *    (여기에 module 을 우선하면 주 디바이스 이름이 엉뚱하게 바뀐다) */
+ *  - auxiliary(모듈·시리얼): 연결된 **모듈명**(CMD·SHELL·OCR·Frame_Check…).
+ *    Common/OCR/Frame_Check 는 name 이 전부 "Common" 이라 구분이 안 되기 때문.
+ *  - primary(ADB 등 물리 디바이스): **모델 기준 이름**(device_id, 예: "Europe_New_1").
+ *    dev.name 은 ADB 가 보고한 모델명(예: "AIVI2_N_FULL")이라 카탈로그 모델과 달라 혼동된다. */
 function deviceLabel(d: DeviceInfo): string {
   if (d.category === 'auxiliary' && d.module) return d.module;
-  return d.name || d.module || d.device_id;
+  return d.device_id || d.device_model || d.name;
 }
 interface Playback {
   scenario_name: string;
@@ -35,6 +35,7 @@ interface Agent {
   name: string;
   ip: string;
   version: string;
+  os: string;          // "Linux" | "Windows" | "" — Common 모듈(SHELL/CMD)로 매니저가 추정
   online: boolean;
   last_seen: string;
   activity: string;
@@ -120,6 +121,14 @@ export default function FleetPage() {
                     <span>
                       <Badge status={a.online ? 'success' : 'default'} />
                       <Typography.Text strong>{a.name || a.client_id}</Typography.Text>
+                      {a.os && (
+                        <Tag
+                          color={a.os === 'Linux' ? 'gold' : 'geekblue'}
+                          style={{ fontSize: 10, marginLeft: 6 }}
+                        >
+                          {a.os}
+                        </Tag>
+                      )}
                     </span>
                   }
                   extra={<Tag color={ACTIVITY_COLOR[a.activity] || 'default'}>{ACTIVITY_LABEL[a.activity] || a.activity}</Tag>}
@@ -137,7 +146,15 @@ export default function FleetPage() {
                       <Tag>{a.connected_device_count}/{a.device_count} 연결</Tag>
                       <span style={{ display: 'inline-flex', flexWrap: 'wrap', gap: 3, marginTop: 3 }}>
                         {a.devices.map(d => (
-                          <Tooltip key={d.device_id} title={`${d.device_id} · ${d.type} · ${d.status}`}>
+                          <Tooltip
+                            key={d.device_id}
+                            title={[
+                              d.device_id,
+                              d.device_model && `모델: ${d.device_model}`,
+                              d.name && d.name !== d.device_id && `ADB명: ${d.name}`,
+                              `${d.type} · ${d.raw_status || d.status}`,
+                            ].filter(Boolean).join(' · ')}
+                          >
                             <Tag color={d.status === 'connected' ? 'green' : 'default'} style={{ fontSize: 10, margin: 0 }}>
                               {deviceLabel(d)}
                             </Tag>
