@@ -3,13 +3,19 @@ import { Badge, Card, Col, Empty, Progress, Row, Statistic, Tag, Tooltip, Typogr
 import { DesktopOutlined, PlayCircleOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import { agentApi } from '../services/api';
 
-interface DeviceInfo { device_id: string; name: string; module?: string; type: string; status: string; }
+interface DeviceInfo {
+  device_id: string; name: string; module?: string;
+  category?: string; type: string; status: string;
+}
 
-/** 디바이스 표시명 — 연결된 모듈명을 우선 표시한다.
- *  Common/OCR/Frame_Check 디바이스는 name 이 전부 "Common" 이라 구분이 안 되므로
- *  module(CMD·SHELL·OCR·Frame_Check…)을 쓰고, 모듈이 없는 물리 디바이스는 name 으로 폴백. */
+/** 디바이스 표시명.
+ *  - auxiliary(모듈·시리얼): 연결된 **모듈명**을 표시. Common/OCR/Frame_Check 는 name 이
+ *    전부 "Common" 이라 구분이 안 되므로 module(CMD·SHELL·OCR·Frame_Check…)을 쓴다.
+ *  - primary(ADB/에이전트 등 물리 디바이스): name 이 곧 식별자이므로 **이름을 그대로** 표시.
+ *    (여기에 module 을 우선하면 주 디바이스 이름이 엉뚱하게 바뀐다) */
 function deviceLabel(d: DeviceInfo): string {
-  return d.module || d.name || d.device_id;
+  if (d.category === 'auxiliary' && d.module) return d.module;
+  return d.name || d.module || d.device_id;
 }
 interface Playback {
   scenario_name: string;
