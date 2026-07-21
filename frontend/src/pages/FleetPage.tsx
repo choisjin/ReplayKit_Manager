@@ -33,8 +33,8 @@ interface Agent {
 }
 interface Summary { total: number; online: number; playing: number; recording: number; }
 
-const ACTIVITY_LABEL: Record<string, string> = { idle: '대기', playing: '재생 중', recording: '녹화 중' };
-const ACTIVITY_COLOR: Record<string, string> = { idle: 'default', playing: 'processing', recording: 'error' };
+const ACTIVITY_LABEL: Record<string, string> = { idle: '대기', in_use: '사용중', playing: '재생 중', recording: '녹화 중' };
+const ACTIVITY_COLOR: Record<string, string> = { idle: 'default', in_use: 'blue', playing: 'processing', recording: 'error' };
 
 function relTime(iso?: string): string {
   if (!iso) return '-';
