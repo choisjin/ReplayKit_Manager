@@ -61,6 +61,19 @@ def init_db():
             generated_at TEXT,            -- 시나리오 측 집계 시각
             updated_at TEXT NOT NULL      -- 서버 저장 시각
         );
+
+        -- PC별 상태 시계열 샘플 (사용량 통계 그래프의 원본).
+        -- 라이브 상태는 메모리에만 있어 서버가 죽으면 사라지므로, SAMPLE_INTERVAL_SEC 마다
+        -- 전 PC 의 상태를 한 tick 으로 찍어 여기 남긴다. 그래프는 이걸 시간 버킷으로 집계.
+        -- ts 는 tick 시각(epoch 초, UTC)이고 같은 tick 의 모든 PC 는 **같은 ts** 를 쓴다
+        -- (버킷당 tick 수 = COUNT(DISTINCT ts) 로 평균 대수를 낼 수 있어야 하기 때문).
+        -- WITHOUT ROWID + PK(ts, client_id) — 행이 작고 ts 범위조회가 대부분이라 이 편이 조밀하다.
+        CREATE TABLE IF NOT EXISTS agent_state_samples (
+            ts INTEGER NOT NULL,
+            client_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            PRIMARY KEY (ts, client_id)
+        ) WITHOUT ROWID;
     """)
     # 마이그레이션: 기존 announcements 테이블에 신규 컬럼 추가
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(announcements)").fetchall()}
@@ -282,6 +295,16 @@ async def delete_agent_usage(client_id: str) -> bool:
         return cur.rowcount > 0
     return await asyncio.to_thread(_run)
 
+async def list_agent_usage_hosts() -> dict[str, str]:
+    """client_id → 호스트명. 레지스트리에서 사라진 PC 의 이름을 그래프에 살리는 용도."""
+    def _run():
+        conn = get_conn()
+        rows = conn.execute("SELECT client_id, host FROM agent_usage").fetchall()
+        conn.close()
+        return {r["client_id"]: (r["host"] or "") for r in rows}
+    return await asyncio.to_thread(_run)
+
+
 async def list_agent_usage() -> list[dict]:
     """저장된 모든 PC의 usage-stats 스냅샷을 반환 (usage_json 파싱)."""
     def _run():
@@ -299,4 +322,109 @@ async def list_agent_usage() -> list[dict]:
             d.pop("usage_json", None)
             out.append(d)
         return out
+    return await asyncio.to_thread(_run)
+
+# --- 에이전트 상태 시계열 (사용량 통계 그래프) ---
+
+
+def _tz_offset_sec() -> int:
+    """서버 로컬 타임존의 UTC 오프셋(초).
+
+    버킷 경계를 **로컬 시각** 기준으로 맞추는 데 쓴다. epoch(UTC) 를 그대로 나누면
+    '1일' 버킷이 KST 오전 9시에서 끊겨 하루 그래프가 이틀에 걸쳐 보인다.
+    """
+    off = datetime.now().astimezone().utcoffset()
+    return int(off.total_seconds()) if off else 0
+
+
+async def insert_state_samples(ts: int, rows: list[tuple[str, str]]) -> None:
+    """한 tick 의 (client_id, state) 목록을 저장. 같은 tick 은 모두 같은 ts 를 쓴다."""
+    if not rows:
+        return
+
+    def _run():
+        conn = get_conn()
+        conn.executemany(
+            "INSERT OR REPLACE INTO agent_state_samples (ts, client_id, state) VALUES (?, ?, ?)",
+            [(ts, cid, state) for cid, state in rows],
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_run)
+
+
+async def delete_state_samples(client_id: str) -> int:
+    """특정 PC 의 상태 이력 삭제 (관제 목록에서 제거할 때 같이 지운다)."""
+    def _run():
+        conn = get_conn()
+        cur = conn.execute("DELETE FROM agent_state_samples WHERE client_id=?", (client_id,))
+        conn.commit()
+        conn.close()
+        return cur.rowcount
+    return await asyncio.to_thread(_run)
+
+
+async def prune_state_samples(before_ts: int) -> int:
+    """보존기간이 지난 샘플 삭제. 반환: 지운 행 수."""
+    def _run():
+        conn = get_conn()
+        cur = conn.execute("DELETE FROM agent_state_samples WHERE ts < ?", (before_ts,))
+        conn.commit()
+        conn.close()
+        return cur.rowcount
+    return await asyncio.to_thread(_run)
+
+
+async def query_state_history(since_ts: int, bucket_sec: int) -> dict:
+    """since_ts 이후 상태 샘플을 세 가지로 집계한다.
+
+      - by_bucket : 시간 흐름(버킷)별 상태 카운트 — 메인 시계열 그래프
+      - by_hour   : 기간 전체를 0~23시로 접은 시간대별 카운트 — '몇 시에 바쁜가'
+      - by_agent  : PC별 상태 카운트 — 가동률 표
+
+    카운트는 **샘플 수**다. 버킷의 tick 수(= COUNT(DISTINCT ts))로 나누면
+    그 구간의 '평균 PC 대수' 가 된다. 서버가 꺼져 있던 구간은 tick 이 0 이므로
+    '전부 대기' 가 아니라 **데이터 없음**으로 구분할 수 있다.
+    """
+    off = _tz_offset_sec()
+
+    def _run():
+        conn = get_conn()
+        # 로컬 시각 기준으로 내림한 버킷 시작(epoch 초)
+        bexpr = f"(((ts + {off}) / {bucket_sec}) * {bucket_sec} - {off})"
+        by_bucket = conn.execute(
+            f"SELECT {bexpr} AS b, state, COUNT(*) AS n FROM agent_state_samples "
+            "WHERE ts >= ? GROUP BY b, state", (since_ts,),
+        ).fetchall()
+        bucket_ticks = conn.execute(
+            f"SELECT {bexpr} AS b, COUNT(DISTINCT ts) AS t FROM agent_state_samples "
+            "WHERE ts >= ? GROUP BY b", (since_ts,),
+        ).fetchall()
+        hexpr = f"(((ts + {off}) / 3600) % 24)"
+        by_hour = conn.execute(
+            f"SELECT {hexpr} AS h, state, COUNT(*) AS n FROM agent_state_samples "
+            "WHERE ts >= ? GROUP BY h, state", (since_ts,),
+        ).fetchall()
+        hour_ticks = conn.execute(
+            f"SELECT {hexpr} AS h, COUNT(DISTINCT ts) AS t FROM agent_state_samples "
+            "WHERE ts >= ? GROUP BY h", (since_ts,),
+        ).fetchall()
+        by_agent = conn.execute(
+            "SELECT client_id, state, COUNT(*) AS n FROM agent_state_samples "
+            "WHERE ts >= ? GROUP BY client_id, state", (since_ts,),
+        ).fetchall()
+        total_ticks = conn.execute(
+            "SELECT COUNT(DISTINCT ts) AS t FROM agent_state_samples WHERE ts >= ?",
+            (since_ts,),
+        ).fetchone()["t"]
+        conn.close()
+        return {
+            "by_bucket": [(r["b"], r["state"], r["n"]) for r in by_bucket],
+            "bucket_ticks": {r["b"]: r["t"] for r in bucket_ticks},
+            "by_hour": [(r["h"], r["state"], r["n"]) for r in by_hour],
+            "hour_ticks": {r["h"]: r["t"] for r in hour_ticks},
+            "by_agent": [(r["client_id"], r["state"], r["n"]) for r in by_agent],
+            "total_ticks": total_ticks,
+            "tz_offset_sec": off,
+        }
     return await asyncio.to_thread(_run)

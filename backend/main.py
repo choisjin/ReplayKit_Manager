@@ -14,7 +14,9 @@ import webbrowser
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import time
+
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -87,7 +89,16 @@ async def lifespan(app: FastAPI):
     db.init_db()
     logger.info("Admin server started — DB initialized")
     _maybe_open_browser()
-    yield
+    # 상태 시계열 샘플러 — 사용량 통계 그래프의 원본을 쌓는다(_state_sampler 참고).
+    sampler = asyncio.create_task(_state_sampler())
+    try:
+        yield
+    finally:
+        sampler.cancel()
+        try:
+            await sampler
+        except (asyncio.CancelledError, Exception):
+            pass
 
 app = FastAPI(title="ReplayKit Admin", lifespan=lifespan)
 
@@ -576,6 +587,105 @@ async def api_agents_function_stats():
     return agents.registry.aggregate_function_stats(extra_snapshots=snapshots)
 
 
+# 상태 시계열 샘플링 — 라이브 상태는 메모리에만 있어 서버가 죽으면 사라지므로,
+# 이 주기로 전 PC 상태를 한 tick 씩 DB 에 남겨 사용량 그래프의 원본으로 쓴다.
+SAMPLE_INTERVAL_SEC = 60
+SAMPLE_RETENTION_DAYS = 35          # '한달' 조회 + 여유
+PRUNE_EVERY_TICKS = 60 * 6          # 6시간마다 오래된 샘플 정리
+
+# 조회 기간 → (초, 버킷 크기). 버킷은 "한 화면에 20~30개 막대" 가 되도록 잡는다.
+HISTORY_RANGES: dict[str, tuple[int, int]] = {
+    "1d":  (86400,      3600),       # 최근 24시간 — 1시간 버킷
+    "7d":  (7 * 86400,  6 * 3600),   # 최근 7일   — 6시간 버킷
+    "30d": (30 * 86400, 86400),      # 최근 30일  — 1일 버킷
+}
+
+
+async def _state_sampler():
+    """SAMPLE_INTERVAL_SEC 마다 전 PC 상태를 DB 에 1 tick 기록하는 백그라운드 루프."""
+    ticks = 0
+    while True:
+        try:
+            await asyncio.sleep(SAMPLE_INTERVAL_SEC)
+            rows = agents.registry.sample_states()
+            if rows:
+                # tick 시각은 주기에 맞춰 내림 — 버킷 경계가 깔끔하고 재시작해도 격자가 유지된다.
+                ts = int(time.time()) // SAMPLE_INTERVAL_SEC * SAMPLE_INTERVAL_SEC
+                await db.insert_state_samples(ts, rows)
+            ticks += 1
+            if ticks % PRUNE_EVERY_TICKS == 0:
+                cutoff = int(time.time()) - SAMPLE_RETENTION_DAYS * 86400
+                deleted = await db.prune_state_samples(cutoff)
+                if deleted:
+                    logger.info("상태 샘플 정리: %d행 삭제 (%d일 이전)", deleted, SAMPLE_RETENTION_DAYS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # 샘플러가 죽으면 그래프가 조용히 비므로 반드시 남긴다.
+            logger.warning("상태 샘플링 실패: %s", e)
+
+
+@app.get("/api/agents/state-history")
+async def api_agent_state_history(range_: str = Query("1d", alias="range")):
+    """사용량 통계 그래프용 — 상태별 시계열/시간대/PC별 집계.
+
+    ⚠️ 이 라우트는 반드시 /api/agents/{client_id} **앞**에 선언돼야 한다.
+       뒤에 두면 "state-history" 가 client_id 로 잡혀 404 가 난다.
+    """
+    if range_ not in HISTORY_RANGES:
+        range_ = "1d"
+    span, bucket_sec = HISTORY_RANGES[range_]
+    now = int(time.time())
+    since = now - span
+
+    agg = await db.query_state_history(since, bucket_sec)
+    off = agg["tz_offset_sec"]
+
+    # 버킷 격자를 먼저 만들고(빈 구간 포함) 집계를 채운다 —
+    # 서버가 꺼져 있던 구간은 ticks=0 으로 남아 '데이터 없음' 으로 그려진다.
+    def _floor(t: int) -> int:
+        return ((t + off) // bucket_sec) * bucket_sec - off
+
+    grid: dict[int, dict] = {}
+    b = _floor(since)
+    while b <= _floor(now):
+        grid[b] = {"t": b, "ticks": agg["bucket_ticks"].get(b, 0), "counts": {}}
+        b += bucket_sec
+    for bt, state, n in agg["by_bucket"]:
+        if bt in grid:
+            grid[bt]["counts"][state] = n
+
+    hours = [{"hour": h, "ticks": agg["hour_ticks"].get(h, 0), "counts": {}} for h in range(24)]
+    for h, state, n in agg["by_hour"]:
+        hours[h]["counts"][state] = n
+
+    # PC 이름 — 라이브 레지스트리 우선, 없으면 함수통계 스냅샷의 호스트명
+    names = {k: v for k, v in agents.registry.names().items() if k}
+    hosts = await db.list_agent_usage_hosts()
+    per_agent: dict[str, dict] = {}
+    for cid, state, n in agg["by_agent"]:
+        a = per_agent.setdefault(cid, {
+            "client_id": cid,
+            "name": names.get(cid) or hosts.get(cid) or cid,
+            "samples": 0, "counts": {},
+        })
+        a["counts"][state] = n
+        a["samples"] += n
+
+    return {
+        "range": range_,
+        "since": since,
+        "now": now,
+        "bucket_sec": bucket_sec,
+        "sample_interval_sec": SAMPLE_INTERVAL_SEC,
+        "retention_days": SAMPLE_RETENTION_DAYS,
+        "total_ticks": agg["total_ticks"],
+        "buckets": [grid[k] for k in sorted(grid)],
+        "hours": hours,
+        "agents": sorted(per_agent.values(), key=lambda a: a["name"].lower()),
+    }
+
+
 @app.get("/api/agents/{client_id}")
 async def api_agent_detail(client_id: str):
     """단일 PC 상세 (usage_stats 포함). 오프라인이면 DB 스냅샷으로 폴백."""
@@ -608,6 +718,7 @@ async def api_agent_delete(client_id: str):
     """
     removed = agents.registry.remove(client_id)
     await db.delete_agent_usage(client_id)
+    await db.delete_state_samples(client_id)   # 사용량 그래프에서도 사라지게
     _last_usage_gen.pop(client_id, None)
     logger.info("에이전트 삭제: %s (live=%s)", client_id, removed)
     return {"status": "ok", "removed": removed}

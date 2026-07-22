@@ -25,6 +25,8 @@ export const translateApi = {
 export const agentApi = {
   list: () => api.get('/agents'),
   functionStats: () => api.get('/agents/function-stats'),
+  // 사용량 통계 그래프 — range: '1d' | '7d' | '30d'
+  stateHistory: (range: string) => api.get('/agents/state-history', { params: { range } }),
   detail: (clientId: string) => api.get(`/agents/${encodeURIComponent(clientId)}`),
   remove: (clientId: string) => api.delete(`/agents/${encodeURIComponent(clientId)}`),
 };

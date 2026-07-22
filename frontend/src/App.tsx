@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { App as AntdApp, Button, ConfigProvider, Layout, Menu, message, Modal, theme } from 'antd';
-import { BulbOutlined, BulbFilled, LogoutOutlined, NotificationOutlined, MessageOutlined, SyncOutlined, DesktopOutlined, BarChartOutlined } from '@ant-design/icons';
+import { BulbOutlined, BulbFilled, LogoutOutlined, NotificationOutlined, MessageOutlined, SyncOutlined, DesktopOutlined, BarChartOutlined, AreaChartOutlined } from '@ant-design/icons';
 import AnnouncementsPage from './pages/AnnouncementsPage';
 import ChatPage from './pages/ChatPage';
 import LoginPage from './pages/LoginPage';
 import PublicViewPage from './pages/PublicViewPage';
 import FleetPage from './pages/FleetPage';
 import FunctionStatsPage from './pages/FunctionStatsPage';
+import UsageStatsPage from './pages/UsageStatsPage';
 import { systemApi } from './services/api';
 
 const { Sider, Content, Header } = Layout;
@@ -81,6 +82,7 @@ function AppContent() {
 
   const pages: Record<string, JSX.Element> = {
     fleet: <FleetPage />,
+    usageStats: <UsageStatsPage />,
     functionStats: <FunctionStatsPage />,
     announcements: <AnnouncementsPage />,
     chat: <ChatPage />,
@@ -101,6 +103,7 @@ function AppContent() {
               onClick={({ key }) => setActiveKey(key)}
               items={[
                 { key: 'fleet', icon: <DesktopOutlined />, label: '테스트 PC 관제' },
+                { key: 'usageStats', icon: <AreaChartOutlined />, label: '사용량 통계' },
                 { key: 'functionStats', icon: <BarChartOutlined />, label: '함수 사용통계' },
                 { key: 'announcements', icon: <NotificationOutlined />, label: '공지사항 관리' },
                 { key: 'chat', icon: <MessageOutlined />, label: '채팅 문의 관리' },

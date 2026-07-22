@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Badge, Button, Card, Col, Empty, Modal, Progress, Row, Segmented, Statistic, Tag, Tooltip, Typography, message } from 'antd';
 import { DeleteOutlined, DesktopOutlined, PlayCircleOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import { agentApi } from '../services/api';
+import { STATE, StateKey, stateOf, tint } from '../lib/agentState';
+import { StateLegend } from '../components/StackedBars';
 
 interface DeviceInfo {
   device_id: string; name: string; module?: string; device_model?: string;
@@ -65,39 +67,7 @@ interface Agent {
 }
 interface Summary { total: number; online: number; playing: number; recording: number; }
 
-// ── 상태(활동) 단일 정의 ──
-// 카드 색 / 태그 / 범례 / 정렬 순서가 **모두 이 표 하나**를 본다. 색을 바꾸려면 여기만 고친다.
-//  - key 는 백엔드 activity(idle/in_use/playing/recording) 에 매니저가 아는 두 가지를
-//    얹은 것: 재생 중 일시정지(paused), 상태 보고 끊김(offline).
-//  - color 는 hex 만 둔다(카드 틴트 계산에 rgba 로 변환해야 해서 antd 프리셋명은 못 쓴다).
-//  - order 는 '상태순' 정렬에서 위로 올라올 순서 — 지금 봐야 하는 것부터.
-type StateKey = 'playing' | 'paused' | 'recording' | 'in_use' | 'idle' | 'offline';
-
-const STATE: Record<StateKey, { label: string; color: string; tag: string; order: number; desc: string }> = {
-  playing:   { label: '재생 중',  color: '#1677ff', tag: 'processing', order: 0, desc: '시나리오 재생 중' },
-  paused:    { label: '일시정지', color: '#faad14', tag: 'warning',    order: 1, desc: '재생 중 일시정지 상태' },
-  recording: { label: '녹화 중',  color: '#ff4d4f', tag: 'error',      order: 2, desc: '시나리오 녹화 중' },
-  in_use:    { label: '사용중',   color: '#52c41a', tag: 'success',    order: 3, desc: 'ReplayKit 창이 최상단 — 사람이 조작 중' },
-  idle:      { label: '대기',     color: '#8c8c8c', tag: 'default',    order: 4, desc: '온라인이지만 재생·녹화·조작 없음' },
-  offline:   { label: '오프라인', color: '#595959', tag: 'default',    order: 5, desc: '45초 이상 상태 보고 없음' },
-};
-const LEGEND_ORDER: StateKey[] = ['playing', 'paused', 'recording', 'in_use', 'idle', 'offline'];
-
-/** 카드 색·태그·정렬의 기준이 되는 단일 상태. */
-function stateOf(a: Agent): StateKey {
-  if (!a.online) return 'offline';
-  if (a.activity === 'playing') return a.playback?.status === 'paused' ? 'paused' : 'playing';
-  if (a.activity === 'recording') return 'recording';
-  if (a.activity === 'in_use') return 'in_use';
-  return 'idle';
-}
-
-/** #rrggbb → rgba(). 반투명 틴트라 라이트/다크 어느 테마 위에 얹혀도 그대로 읽힌다
- *  (불투명 색을 쓰면 다크 모드에서 글자가 묻힌다). */
-function tint(hex: string, alpha: number): string {
-  const n = parseInt(hex.slice(1), 16);
-  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
-}
+// 상태(색·라벨·순서) 정의는 lib/agentState.ts 한 곳 — 사용량 그래프와 공유한다.
 
 // ── 정렬 ──
 // 기본값은 **연결 순서 고정**(default) — 2초마다 폴링하므로 상태순으로 두면 카드가 계속
@@ -260,7 +230,7 @@ export default function FleetPage() {
       content: (
         <div style={{ fontSize: 12, lineHeight: 1.8 }}>
           <b>{a.name || a.client_id}</b> 를 목록에서 제거합니다.<br />
-          저장된 함수통계 스냅샷도 함께 삭제됩니다.<br />
+          저장된 함수통계 스냅샷과 사용량 이력(그래프)도 함께 삭제됩니다.<br />
           <span style={{ color: '#888' }}>
             해당 PC 가 다시 접속하면 자동으로 재등록됩니다.
           </span>
@@ -407,22 +377,8 @@ export default function FleetPage() {
         display: 'flex', alignItems: 'center', gap: 12,
         flexWrap: 'wrap', marginBottom: 12,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flex: 1 }}>
-          {LEGEND_ORDER.map(k => (
-            <Tooltip key={k} title={STATE[k].desc}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, cursor: 'default' }}>
-                <span style={{
-                  width: 10, height: 10, borderRadius: 3,
-                  background: STATE[k].color, display: 'inline-block',
-                }} />
-                {STATE[k].label}
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {stateCount[k] || 0}
-                </Typography.Text>
-              </span>
-            </Tooltip>
-          ))}
-        </div>
+        {/* 범례는 사용량 통계 페이지와 공용 컴포넌트 — 색 정의가 갈라지지 않게 */}
+        <div style={{ flex: 1, minWidth: 0 }}><StateLegend counts={stateCount} /></div>
         <Tooltip title="연결순 = 접속한 순서 고정(카드가 자리를 옮기지 않음) · 상태순 = 재생 중부터 위로">
           <Segmented
             size="small"

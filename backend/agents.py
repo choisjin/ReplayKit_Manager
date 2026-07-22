@@ -187,6 +187,36 @@ class AgentRegistry:
         v["usage_stats"] = st.get("usage_stats")
         return v
 
+    def sample_states(self) -> list[tuple[str, str]]:
+        """지금 이 순간 전 PC 의 (client_id, state) — 상태 시계열 1 tick.
+
+        state 는 프론트 agentState.ts 의 StateKey 와 **같은 값**이어야 한다
+        (그래프 색·라벨을 프론트가 그 표로 그린다). 규칙도 동일:
+        오프라인 > 재생중(일시정지 분리) > 녹화중 > 사용중 > 대기.
+        """
+        out: list[tuple[str, str]] = []
+        for st in self._agents.values():
+            cid = st.get("client_id") or ""
+            if not cid:
+                continue
+            if not self._is_online(st):
+                state = "offline"
+            else:
+                act = st.get("activity", "idle")
+                if act == "playing":
+                    pb = st.get("playback") or {}
+                    state = "paused" if pb.get("status") == "paused" else "playing"
+                elif act in ("recording", "in_use"):
+                    state = act
+                else:
+                    state = "idle"
+            out.append((cid, state))
+        return out
+
+    def names(self) -> dict[str, str]:
+        """client_id → 호스트명 (그래프의 PC별 표시용)."""
+        return {st.get("client_id", ""): st.get("name", "") for st in self._agents.values()}
+
     def summary(self) -> dict:
         views = self.get_all()
         online = [v for v in views if v["online"]]
