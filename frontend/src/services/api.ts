@@ -27,6 +27,10 @@ export const agentApi = {
   functionStats: () => api.get('/agents/function-stats'),
   // 사용량 통계 그래프 — range: '1d' | '7d' | '30d'
   stateHistory: (range: string) => api.get('/agents/state-history', { params: { range } }),
+  // 상태 이력 보관 현황 / 수동 삭제 (보관은 무기한 — 자동 삭제 없음)
+  stateHistoryInfo: () => api.get('/agents/state-history/info'),
+  stateHistoryDelete: (params: { before?: number; client_id?: string; vacuum?: boolean }) =>
+    api.delete('/agents/state-history', { params }),
   detail: (clientId: string) => api.get(`/agents/${encodeURIComponent(clientId)}`),
   remove: (clientId: string) => api.delete(`/agents/${encodeURIComponent(clientId)}`),
 };

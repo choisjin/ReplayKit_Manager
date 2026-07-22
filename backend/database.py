@@ -353,25 +353,75 @@ async def insert_state_samples(ts: int, rows: list[tuple[str, str]]) -> None:
     await asyncio.to_thread(_run)
 
 
-async def delete_state_samples(client_id: str) -> int:
-    """특정 PC 의 상태 이력 삭제 (관제 목록에서 제거할 때 같이 지운다)."""
+async def state_sample_stats() -> dict:
+    """상태 이력 보관 현황 — 삭제 화면에서 '지금 뭐가 얼마나 쌓여 있는지' 보여준다.
+
+    이력은 자동 삭제하지 않고 **무기한 보관**한다(정리는 관리자가 직접).
+    """
     def _run():
         conn = get_conn()
-        cur = conn.execute("DELETE FROM agent_state_samples WHERE client_id=?", (client_id,))
-        conn.commit()
+        row = conn.execute(
+            "SELECT COUNT(*) AS rows, MIN(ts) AS oldest, MAX(ts) AS newest, "
+            "COUNT(DISTINCT client_id) AS agents, COUNT(DISTINCT ts) AS ticks "
+            "FROM agent_state_samples"
+        ).fetchone()
+        # 파일 전체 크기(공지 이미지 등 포함)와, 상태 이력이 차지하는 대략치를 함께 준다.
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+        per_agent = conn.execute(
+            "SELECT client_id, COUNT(*) AS n, MIN(ts) AS oldest, MAX(ts) AS newest "
+            "FROM agent_state_samples GROUP BY client_id"
+        ).fetchall()
         conn.close()
-        return cur.rowcount
+        return {
+            "rows": row["rows"] or 0,
+            "ticks": row["ticks"] or 0,
+            "agents": row["agents"] or 0,
+            "oldest_ts": row["oldest"],
+            "newest_ts": row["newest"],
+            # 행당 약 26바이트 — 실측(6.9만행 ≈ 1.7MB)으로 잡은 어림값. sqlite dbstat 확장이
+            # 빌드에 없어 정확한 테이블 크기는 못 구한다. 표기도 '약'으로 한다.
+            "approx_bytes": (row["rows"] or 0) * 26,
+            "db_bytes": page_size * page_count,
+            "per_agent": [
+                {"client_id": r["client_id"], "rows": r["n"],
+                 "oldest_ts": r["oldest"], "newest_ts": r["newest"]}
+                for r in per_agent
+            ],
+        }
     return await asyncio.to_thread(_run)
 
 
-async def prune_state_samples(before_ts: int) -> int:
-    """보존기간이 지난 샘플 삭제. 반환: 지운 행 수."""
+async def delete_state_samples(*, client_id: str | None = None,
+                               before_ts: int | None = None,
+                               vacuum: bool = False) -> int:
+    """상태 이력 삭제. 반환: 지운 행 수.
+
+    - client_id 만: 그 PC 의 전체 이력 (관제 목록에서 PC 를 제거할 때)
+    - before_ts 만: 그 시각 이전 전체 PC 이력 (오래된 것 정리)
+    - 둘 다 없으면: **전 이력 삭제**
+    - vacuum=True 면 삭제 후 파일 공간을 실제로 회수한다(느릴 수 있어 선택).
+    """
     def _run():
         conn = get_conn()
-        cur = conn.execute("DELETE FROM agent_state_samples WHERE ts < ?", (before_ts,))
+        where, params = [], []
+        if client_id:
+            where.append("client_id=?")
+            params.append(client_id)
+        if before_ts is not None:
+            where.append("ts < ?")
+            params.append(before_ts)
+        sql = "DELETE FROM agent_state_samples"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        cur = conn.execute(sql, params)
         conn.commit()
+        n = cur.rowcount
+        if vacuum and n:
+            # DELETE 만으로는 파일이 줄지 않는다 — 재작성해서 공간을 실제로 반환.
+            conn.execute("VACUUM")
         conn.close()
-        return cur.rowcount
+        return n
     return await asyncio.to_thread(_run)
 
 

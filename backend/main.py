@@ -589,9 +589,9 @@ async def api_agents_function_stats():
 
 # 상태 시계열 샘플링 — 라이브 상태는 메모리에만 있어 서버가 죽으면 사라지므로,
 # 이 주기로 전 PC 상태를 한 tick 씩 DB 에 남겨 사용량 그래프의 원본으로 쓴다.
+# 보관은 **무기한** — 자동 삭제하지 않는다. 정리는 관리자가 사용량 통계 화면의
+# '이력 관리' 에서 직접 한다(DELETE /api/agents/state-history).
 SAMPLE_INTERVAL_SEC = 60
-SAMPLE_RETENTION_DAYS = 35          # '한달' 조회 + 여유
-PRUNE_EVERY_TICKS = 60 * 6          # 6시간마다 오래된 샘플 정리
 
 # 조회 기간 → (초, 버킷 크기). 버킷은 "한 화면에 20~30개 막대" 가 되도록 잡는다.
 HISTORY_RANGES: dict[str, tuple[int, int]] = {
@@ -603,7 +603,6 @@ HISTORY_RANGES: dict[str, tuple[int, int]] = {
 
 async def _state_sampler():
     """SAMPLE_INTERVAL_SEC 마다 전 PC 상태를 DB 에 1 tick 기록하는 백그라운드 루프."""
-    ticks = 0
     while True:
         try:
             await asyncio.sleep(SAMPLE_INTERVAL_SEC)
@@ -612,12 +611,6 @@ async def _state_sampler():
                 # tick 시각은 주기에 맞춰 내림 — 버킷 경계가 깔끔하고 재시작해도 격자가 유지된다.
                 ts = int(time.time()) // SAMPLE_INTERVAL_SEC * SAMPLE_INTERVAL_SEC
                 await db.insert_state_samples(ts, rows)
-            ticks += 1
-            if ticks % PRUNE_EVERY_TICKS == 0:
-                cutoff = int(time.time()) - SAMPLE_RETENTION_DAYS * 86400
-                deleted = await db.prune_state_samples(cutoff)
-                if deleted:
-                    logger.info("상태 샘플 정리: %d행 삭제 (%d일 이전)", deleted, SAMPLE_RETENTION_DAYS)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -678,12 +671,40 @@ async def api_agent_state_history(range_: str = Query("1d", alias="range")):
         "now": now,
         "bucket_sec": bucket_sec,
         "sample_interval_sec": SAMPLE_INTERVAL_SEC,
-        "retention_days": SAMPLE_RETENTION_DAYS,
         "total_ticks": agg["total_ticks"],
         "buckets": [grid[k] for k in sorted(grid)],
         "hours": hours,
         "agents": sorted(per_agent.values(), key=lambda a: a["name"].lower()),
     }
+
+
+@app.get("/api/agents/state-history/info")
+async def api_state_history_info():
+    """상태 이력 보관 현황 (이력 관리 화면용). PC 이름을 붙여 반환한다."""
+    info = await db.state_sample_stats()
+    names = agents.registry.names()
+    hosts = await db.list_agent_usage_hosts()
+    for a in info.get("per_agent", []):
+        cid = a["client_id"]
+        a["name"] = names.get(cid) or hosts.get(cid) or cid
+    info["per_agent"].sort(key=lambda a: a["name"].lower())
+    return info
+
+
+@app.delete("/api/agents/state-history")
+async def api_state_history_delete(
+    before: int | None = Query(None, description="이 epoch(초) 이전 삭제. 미지정이면 기간 제한 없음"),
+    client_id: str | None = Query(None, description="이 PC 만 삭제. 미지정이면 전체 PC"),
+    vacuum: bool = Query(True, description="삭제 후 DB 파일 공간 회수(느릴 수 있음)"),
+):
+    """상태 이력 수동 삭제 — 보관은 무기한이라 정리는 여기서만 일어난다.
+
+    before/client_id 를 모두 비우면 **전 이력 삭제**다(프론트가 확인창을 띄운다).
+    """
+    deleted = await db.delete_state_samples(
+        client_id=client_id or None, before_ts=before, vacuum=vacuum)
+    logger.info("상태 이력 삭제: %d행 (before=%s, client_id=%s)", deleted, before, client_id)
+    return {"status": "ok", "deleted": deleted}
 
 
 @app.get("/api/agents/{client_id}")
@@ -718,7 +739,7 @@ async def api_agent_delete(client_id: str):
     """
     removed = agents.registry.remove(client_id)
     await db.delete_agent_usage(client_id)
-    await db.delete_state_samples(client_id)   # 사용량 그래프에서도 사라지게
+    await db.delete_state_samples(client_id=client_id)   # 사용량 그래프에서도 사라지게
     _last_usage_gen.pop(client_id, None)
     logger.info("에이전트 삭제: %s (live=%s)", client_id, removed)
     return {"status": "ok", "removed": removed}

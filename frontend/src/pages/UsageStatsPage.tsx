@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Card, Col, Empty, Progress, Row, Segmented, Statistic, Table, Tooltip, Typography } from 'antd';
-import { AreaChartOutlined, ReloadOutlined } from '@ant-design/icons';
+import { AreaChartOutlined, DatabaseOutlined, ReloadOutlined } from '@ant-design/icons';
 import { agentApi } from '../services/api';
 import { ACTIVE_STATES, STATE, STATE_ORDER, StateKey } from '../lib/agentState';
 import StackedBars, { Bucket, StateLegend } from '../components/StackedBars';
+import HistoryManageModal from '../components/HistoryManageModal';
 
 type Counts = Partial<Record<StateKey, number>>;
 interface RawBucket { t: number; ticks: number; counts: Counts }
@@ -15,7 +16,6 @@ interface History {
   now: number;
   bucket_sec: number;
   sample_interval_sec: number;
-  retention_days: number;
   total_ticks: number;
   buckets: RawBucket[];
   hours: RawHour[];
@@ -67,6 +67,7 @@ export default function UsageStatsPage() {
   const [mode, setMode] = useState<'avg' | 'pct'>('avg');
   const [data, setData] = useState<History | null>(null);
   const [loading, setLoading] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
   const timer = useRef<number | null>(null);
 
   const load = async (r: RangeKey) => {
@@ -187,12 +188,21 @@ export default function UsageStatsPage() {
         <Button size="small" icon={<ReloadOutlined />} onClick={() => load(range)} loading={loading} style={{ marginLeft: 12 }}>
           새로고침
         </Button>
+        <Button size="small" icon={<DatabaseOutlined />} onClick={() => setManageOpen(true)} style={{ marginLeft: 8 }}>
+          이력 관리
+        </Button>
       </Typography.Title>
       <Typography.Paragraph type="secondary">
         관제 서버가 {data?.sample_interval_sec ?? 60}초마다 기록한 전 PC 의 상태를 시간대별로 집계합니다.
-        기록은 <b>매니저가 켜져 있는 동안만</b> 쌓이며 {data?.retention_days ?? 35}일간 보관합니다.
-        (막대에 마우스를 올리면 상세)
+        기록은 <b>매니저가 켜져 있는 동안만</b> 쌓이고, <b>자동 삭제 없이 무기한 보관</b>됩니다
+        (정리는 <b>이력 관리</b>에서 직접). 막대에 마우스를 올리면 상세가 보입니다.
       </Typography.Paragraph>
+
+      <HistoryManageModal
+        open={manageOpen}
+        onClose={() => setManageOpen(false)}
+        onChanged={() => load(range)}
+      />
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
         <Segmented value={range} onChange={(v) => setRange(v as RangeKey)} options={RANGE_OPTIONS} />
