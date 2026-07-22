@@ -73,13 +73,13 @@ function fmtSize(bytes: number): string {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
+// "2026. 07. 22. 15:05:05" — 목록 2줄 표기와 같은 양식의 한 줄 버전
 function fmtTime(iso?: string): string {
   if (!iso) return '-';
-  try {
-    return new Date(iso).toLocaleString('ko-KR', { hour12: false });
-  } catch {
-    return iso;
-  }
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}. ${p(d.getMonth() + 1)}. ${p(d.getDate())}. ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 function StatusTag({ status, similarity }: { status: string; similarity?: number | null }) {

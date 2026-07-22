@@ -10,13 +10,16 @@ function fmtSize(bytes: number): string {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
-function fmtTime(iso: string): string {
-  if (!iso) return '-';
-  try {
-    return new Date(iso).toLocaleString('ko-KR', { hour12: false });
-  } catch {
-    return iso;
-  }
+// "2026. 07. 22." / "15:05:05" — 목록에서는 2줄로 표시
+function fmtDateTimeParts(iso: string): [string, string] | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  const p = (n: number) => String(n).padStart(2, '0');
+  return [
+    `${d.getFullYear()}. ${p(d.getMonth() + 1)}. ${p(d.getDate())}.`,
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`,
+  ];
 }
 
 export default function BugReportsPage() {
@@ -94,7 +97,18 @@ export default function BugReportsPage() {
     { title: '제보자', dataIndex: 'reporter', width: 140, ellipsis: true },
     { title: '호스트', dataIndex: 'hostname', width: 130, ellipsis: true },
     { title: '버전', dataIndex: 'version', width: 90 },
-    { title: '수신 시각', dataIndex: 'received_at', width: 170, render: fmtTime },
+    {
+      title: '수신 시각', dataIndex: 'received_at', width: 120,
+      render: (v: string) => {
+        const parts = fmtDateTimeParts(v);
+        return parts ? (
+          <div style={{ lineHeight: 1.4 }}>
+            <div>{parts[0]}</div>
+            <div>{parts[1]}</div>
+          </div>
+        ) : '-';
+      },
+    },
     { title: '크기', dataIndex: 'file_size', width: 90, render: fmtSize },
     {
       title: '', key: 'actions', width: 110,
