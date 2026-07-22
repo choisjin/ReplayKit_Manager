@@ -159,13 +159,49 @@ function modeTooltip(a: Agent) {
   );
 }
 
+/** 재생 진행률(0~100) + 총량을 아는지 여부.
+ *
+ *  ⚠️ 회차만으로 계산하면 안 된다 — current_cycle 은 1-based 라 1회 재생(1/1)은 시작하자마자
+ *  100% 가 되고, antd Progress 는 100% 를 '완료(초록)' 로 칠해 카드가 늘 초록 막대로 보인다.
+ *  실제로 보고 싶은 건 "지금 어디까지 왔나" 이므로 **회차 + 그 회차 안의 스텝**을 합쳐 쓴다.
+ *
+ *      진행률 = (완료한 회차 + 현재 회차의 스텝 진행분) / 총 회차
+ *
+ *  · current_step 은 step_start 에서 올라가는 **진행 중** 스텝 번호(1-based) →
+ *    완료분은 (current_step - 1). 그래서 시작 직후엔 0% 에서 출발한다.
+ *  · current_step > total_steps 가 될 수 있다(구간반복 loops·조건부이동 revisit 은 같은 스텝을
+ *    다시 실행하지만 total_steps 는 시나리오의 스텝 수 그대로) → 1로 클램프.
+ *  · total_cycles = 0 은 '시간 지정 재생'(끝 회차 미정) → 총량 미상. 현재 회차 안의 진행만
+ *    보여주고 determinate=false 로 구분한다.
+ *  · 실행 중에는 99% 상한 — 100% 를 넘기면 antd 가 초록 '완료' 로 바꿔 끝난 것처럼 보인다. */
+function playbackProgress(pb: Playback): { percent: number; determinate: boolean } {
+  const totalSteps = pb.total_steps > 0 ? pb.total_steps : 0;
+  const stepFrac = totalSteps > 0
+    ? Math.min(1, Math.max(0, (pb.current_step - 1) / totalSteps))
+    : 0;
+  const totalCycles = pb.total_cycles > 0 ? pb.total_cycles : 0;
+  if (totalCycles === 0) {
+    return { percent: Math.round(stepFrac * 100), determinate: false };
+  }
+  const doneCycles = Math.min(totalCycles, Math.max(0, pb.current_cycle - 1));
+  const frac = (doneCycles + stepFrac) / totalCycles;
+  return { percent: Math.min(99, Math.max(0, Math.round(frac * 100))), determinate: true };
+}
+
 function playbackTooltip(a: Agent) {
   const pb = a.playback;
   if (!pb) return `재생 중 아님 · 시나리오 ${a.scenario_count}개 보유`;
+  const { percent, determinate } = playbackProgress(pb);
   return (
     <div style={{ maxWidth: 320, fontSize: 11, lineHeight: 1.7 }}>
       <div><b>{pb.scenario_name}</b></div>
       <div>회차 {pb.current_cycle}/{pb.total_cycles || '?'} · 스텝 {pb.current_step}/{pb.total_steps}</div>
+      <div>
+        진행 {percent}%
+        {determinate
+          ? ' (전체 회차 기준)'
+          : ' — 시간 지정 재생이라 남은 회차를 알 수 없어 현재 회차 안의 진행만 표시'}
+      </div>
       <div>
         <span style={{ color: '#52c41a' }}>PASS {pb.passed}</span>{' · '}
         <span style={{ color: '#ff4d4f' }}>FAIL {pb.failed}</span>
@@ -256,7 +292,8 @@ export default function FleetPage() {
   const renderCard = (a: Agent) => {
     const pb = a.playback;
     const cycleTotal = pb?.total_cycles || 0;
-    const cyclePct = cycleTotal > 0 ? Math.round((pb!.current_cycle / cycleTotal) * 100) : 0;
+    // 회차+스텝을 합친 실제 진행률 (회차만 쓰면 1/1 재생이 늘 100% 초록으로 보인다)
+    const prog = pb ? playbackProgress(pb) : null;
     const st = stateOf(a);
     const c = STATE[st].color;
     // 대기/오프라인은 틴트를 옅게 — 활동 중인 PC 가 상대적으로 튀어 보이게 한다.
@@ -322,10 +359,26 @@ export default function FleetPage() {
           {/* 3행 — 재생 진행 (재생 여부와 무관하게 같은 높이를 차지해 카드 크기 고정) */}
           <Tooltip title={playbackTooltip(a)}>
             <div style={{ marginTop: 6, height: 20, display: 'flex', alignItems: 'center', gap: 6, cursor: 'default' }}>
-              {pb ? (
+              {pb && prog ? (
                 <>
-                  <Progress percent={cyclePct} size="small" showInfo={false} style={{ flex: 1, margin: 0 }} />
-                  <span style={{ fontSize: 10, whiteSpace: 'nowrap' }}>{pb.current_cycle}/{cycleTotal || '?'}</span>
+                  <Progress
+                    percent={prog.percent}
+                    size="small"
+                    showInfo={false}
+                    /* status 를 고정하지 않으면 antd 가 100% 를 '완료(초록)' 로 칠한다.
+                       일시정지는 노랑, 총량 미상(시간 지정)은 연한 색으로 구분. */
+                    status="normal"
+                    strokeColor={
+                      pb.status === 'paused' ? '#faad14'
+                        : prog.determinate ? '#1677ff' : '#69b1ff'
+                    }
+                    style={{ flex: 1, minWidth: 36, margin: 0 }}
+                  />
+                  {/* 회차/스텝을 한 덩어리로 — 좁은 카드에서 게이지 폭을 잡아먹지 않게 */}
+                  <span style={{ fontSize: 10, whiteSpace: 'nowrap' }}>
+                    {pb.current_cycle}/{cycleTotal || '?'}
+                    <span style={{ opacity: 0.6 }}>·{pb.current_step}/{pb.total_steps || '?'}</span>
+                  </span>
                   <span style={{ fontSize: 10, color: '#52c41a' }}>{pb.passed}</span>
                   <span style={{ fontSize: 10, color: '#ff4d4f' }}>{pb.failed}</span>
                   <span style={{ fontSize: 10, color: '#fa541c' }}>{pb.error}</span>
