@@ -74,6 +74,25 @@ def init_db():
             state TEXT NOT NULL,
             PRIMARY KEY (ts, client_id)
         ) WITHOUT ROWID;
+
+        -- 클라이언트(ReplayKit)가 제출한 버그 리포트. ZIP 본문은 디스크
+        -- (bug_reports/ 디렉토리)에 두고 여기는 메타만 영속화한다.
+        CREATE TABLE IF NOT EXISTS bug_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT,
+            reporter TEXT,
+            version TEXT,
+            boot_id TEXT,
+            platform TEXT,
+            hostname TEXT,
+            client_created_at TEXT,       -- 클라이언트가 찍은 생성 시각
+            received_at TEXT NOT NULL,    -- 서버 수신 시각
+            file_path TEXT,               -- 프로젝트 루트 기준 상대경로
+            file_name TEXT,               -- 원본 업로드 파일명
+            file_size INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'new'     -- 'new' | 'reviewed'
+        );
     """)
     # 마이그레이션: 기존 announcements 테이블에 신규 컬럼 추가
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(announcements)").fetchall()}
@@ -477,4 +496,71 @@ async def query_state_history(since_ts: int, bucket_sec: int) -> dict:
             "total_ticks": total_ticks,
             "tz_offset_sec": off,
         }
+    return await asyncio.to_thread(_run)
+
+# --- 버그 리포트 ---
+
+async def create_bug_report(
+    title: str,
+    description: str = "",
+    reporter: str = "",
+    version: str = "",
+    boot_id: str = "",
+    platform: str = "",
+    hostname: str = "",
+    client_created_at: str = "",
+    file_path: str = "",
+    file_name: str = "",
+    file_size: int = 0,
+) -> dict:
+    def _run():
+        conn = get_conn()
+        now = _now()
+        cur = conn.execute(
+            "INSERT INTO bug_reports "
+            "(title, description, reporter, version, boot_id, platform, hostname, "
+            " client_created_at, received_at, file_path, file_name, file_size, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')",
+            (title, description, reporter, version, boot_id, platform, hostname,
+             client_created_at, now, file_path, file_name, file_size),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM bug_reports WHERE id=?", (cur.lastrowid,)).fetchone()
+        conn.close()
+        return dict(row)
+    return await asyncio.to_thread(_run)
+
+async def list_bug_reports() -> list[dict]:
+    def _run():
+        conn = get_conn()
+        rows = conn.execute("SELECT * FROM bug_reports ORDER BY received_at DESC").fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    return await asyncio.to_thread(_run)
+
+async def get_bug_report(report_id: int) -> dict | None:
+    def _run():
+        conn = get_conn()
+        row = conn.execute("SELECT * FROM bug_reports WHERE id=?", (report_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    return await asyncio.to_thread(_run)
+
+async def update_bug_report_status(report_id: int, status: str) -> dict | None:
+    def _run():
+        conn = get_conn()
+        conn.execute("UPDATE bug_reports SET status=? WHERE id=?", (status, report_id))
+        conn.commit()
+        row = conn.execute("SELECT * FROM bug_reports WHERE id=?", (report_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    return await asyncio.to_thread(_run)
+
+async def delete_bug_report(report_id: int) -> bool:
+    def _run():
+        conn = get_conn()
+        cur = conn.execute("DELETE FROM bug_reports WHERE id=?", (report_id,))
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
     return await asyncio.to_thread(_run)

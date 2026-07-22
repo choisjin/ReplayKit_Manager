@@ -8,3 +8,6 @@ frontend/node_modules/
 .vscode/
 .idea/
 .bkit/
+bug_reports/
+backend/admin.db-wal
+backend/admin.db-shm

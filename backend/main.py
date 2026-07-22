@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import time
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, File, Form, Query, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -805,6 +805,117 @@ async def ws_client(ws: WebSocket):
     finally:
         if client_id:
             agents.registry.mark_offline(client_id)
+
+
+# ==================== 버그 리포트 API ====================
+# ReplayKit 클라이언트가 multipart(meta JSON 문자열 + ZIP)로 제출한다.
+# ZIP 본문은 bug_reports/YYYYMMDD/ 디렉토리에 저장하고 DB에는 메타만 남긴다.
+
+BUG_REPORTS_DIR = _PROJECT_ROOT / "bug_reports"
+_BUG_REPORT_MAX_BYTES = 200 * 1024 * 1024  # 업로드 상한 200MB
+
+
+@app.post("/api/bug-reports")
+async def submit_bug_report(meta: str = Form(...), file: UploadFile = File(...)):
+    try:
+        meta_obj = json.loads(meta)
+        if not isinstance(meta_obj, dict):
+            raise ValueError("meta must be a JSON object")
+    except (json.JSONDecodeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid meta JSON: {e}")
+
+    title = str(meta_obj.get("title") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="meta.title is required")
+
+    # 저장 파일명은 서버가 생성 (업로드 파일명은 표시용으로만 DB에 보관)
+    now = datetime.now(timezone.utc)
+    day_dir = BUG_REPORTS_DIR / now.strftime("%Y%m%d")
+    day_dir.mkdir(parents=True, exist_ok=True)
+    save_path = day_dir / f"{now.strftime('%H%M%S')}_{uuid.uuid4().hex[:8]}.zip"
+
+    size = 0
+    try:
+        with open(save_path, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > _BUG_REPORT_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="file too large (max 200MB)")
+                out.write(chunk)
+    except HTTPException:
+        save_path.unlink(missing_ok=True)
+        raise
+    except OSError as e:
+        save_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"file save failed: {e}")
+
+    report = await db.create_bug_report(
+        title=title,
+        description=str(meta_obj.get("description") or ""),
+        reporter=str(meta_obj.get("reporter") or ""),
+        version=str(meta_obj.get("version") or ""),
+        boot_id=str(meta_obj.get("boot_id") or ""),
+        platform=str(meta_obj.get("platform") or ""),
+        hostname=str(meta_obj.get("hostname") or ""),
+        client_created_at=str(meta_obj.get("created_at") or ""),
+        file_path=str(save_path.relative_to(_PROJECT_ROOT)).replace("\\", "/"),
+        file_name=file.filename or "bugreport.zip",
+        file_size=size,
+    )
+    logger.info("bug report #%s received: %s (%s, %.1f MB)",
+                report["id"], title, report["reporter"], size / 1048576)
+    return {"id": report["id"], "received_at": report["received_at"]}
+
+
+@app.get("/api/bug-reports")
+async def list_bug_reports():
+    return await db.list_bug_reports()
+
+
+@app.get("/api/bug-reports/{report_id}/download")
+async def download_bug_report(report_id: int):
+    report = await db.get_bug_report(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="버그 리포트를 찾을 수 없습니다")
+    path = _PROJECT_ROOT / (report.get("file_path") or "")
+    if not report.get("file_path") or not path.is_file():
+        raise HTTPException(status_code=404, detail="첨부 파일이 없습니다")
+    # 파일명은 서버 생성 ASCII(bugreport_*.zip)라 단순 헤더로 충분
+    name = report.get("file_name") or path.name
+    safe = name.encode("ascii", "ignore").decode() or path.name
+    return FileResponse(
+        str(path),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe}"'},
+    )
+
+
+class BugReportStatusUpdate(BaseModel):
+    status: str  # 'new' | 'reviewed'
+
+
+@app.put("/api/bug-reports/{report_id}")
+async def update_bug_report(report_id: int, req: BugReportStatusUpdate):
+    if req.status not in ("new", "reviewed"):
+        raise HTTPException(status_code=400, detail="status must be 'new' or 'reviewed'")
+    report = await db.update_bug_report_status(report_id, req.status)
+    if not report:
+        raise HTTPException(status_code=404, detail="버그 리포트를 찾을 수 없습니다")
+    return report
+
+
+@app.delete("/api/bug-reports/{report_id}")
+async def delete_bug_report(report_id: int):
+    report = await db.get_bug_report(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="버그 리포트를 찾을 수 없습니다")
+    if report.get("file_path"):
+        try:
+            (_PROJECT_ROOT / report["file_path"]).unlink(missing_ok=True)
+        except OSError:
+            logger.warning("bug report file delete failed: %s", report["file_path"])
+    await db.delete_bug_report(report_id)
+    return {"status": "ok"}
 
 
 # ==================== Static files (Admin Frontend) ====================

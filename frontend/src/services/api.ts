@@ -35,6 +35,13 @@ export const agentApi = {
   remove: (clientId: string) => api.delete(`/agents/${encodeURIComponent(clientId)}`),
 };
 
+export const bugReportApi = {
+  list: () => api.get('/bug-reports'),
+  updateStatus: (id: number, status: 'new' | 'reviewed') => api.put(`/bug-reports/${id}`, { status }),
+  delete: (id: number) => api.delete(`/bug-reports/${id}`),
+  downloadUrl: (id: number) => `/api/bug-reports/${id}/download`,
+};
+
 export const chatApi = {
   rooms: () => api.get('/chat/rooms'),
   messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),
