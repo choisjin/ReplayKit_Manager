@@ -905,6 +905,70 @@ async def update_bug_report(report_id: int, req: BugReportStatusUpdate):
     return report
 
 
+@app.post("/api/bug-reports/import")
+async def import_bug_report(file: UploadFile = File(...)):
+    """로컬 폴백으로 받은 버그 리포트 ZIP 을 관리자가 수동 등록.
+
+    Manager 에 접근하지 못하는 유저는 업로드 실패 시 ZIP 을 로컬 다운로드해
+    메일/메신저로 전달한다 — 그 파일을 여기로 올리면 메타를 ZIP 안
+    report.json 에서 추출해 일반 제출과 동일하게 목록/뷰어에 나타난다.
+    """
+    now = datetime.now(timezone.utc)
+    day_dir = BUG_REPORTS_DIR / now.strftime("%Y%m%d")
+    day_dir.mkdir(parents=True, exist_ok=True)
+    save_path = day_dir / f"{now.strftime('%H%M%S')}_{uuid.uuid4().hex[:8]}.zip"
+
+    size = 0
+    try:
+        with open(save_path, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > _BUG_REPORT_MAX_BYTES:
+                    raise HTTPException(status_code=413, detail="file too large (max 200MB)")
+                out.write(chunk)
+    except HTTPException:
+        save_path.unlink(missing_ok=True)
+        raise
+    except OSError as e:
+        save_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"file save failed: {e}")
+
+    # ZIP 검증 + report.json 메타 추출 (없거나 손상이면 파일명으로 폴백)
+    def _extract_meta():
+        with zipfile.ZipFile(save_path) as zf:
+            for info in zf.infolist():
+                if not info.is_dir() and _zip_rel(info.filename) == "report.json":
+                    return json.loads(zf.read(info))
+        return None
+
+    try:
+        meta_obj = await asyncio.to_thread(_extract_meta)
+    except zipfile.BadZipFile:
+        save_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="ZIP 파일이 아니거나 손상되었습니다")
+    except (json.JSONDecodeError, KeyError):
+        meta_obj = None  # report.json 손상 — 파일명 폴백으로 계속
+
+    meta_obj = meta_obj or {}
+    env = meta_obj.get("env") or {}
+    fallback_title = Path(file.filename or "bugreport.zip").stem
+    report = await db.create_bug_report(
+        title=str(meta_obj.get("title") or fallback_title),
+        description=str(meta_obj.get("description") or ""),
+        reporter=str(meta_obj.get("reporter") or ""),
+        version=str(env.get("version") or ""),
+        boot_id=str(env.get("boot_id") or ""),
+        platform=str(env.get("platform") or ""),
+        hostname=str(env.get("hostname") or ""),
+        client_created_at=str(env.get("created_at") or ""),
+        file_path=str(save_path.relative_to(_PROJECT_ROOT)).replace("\\", "/"),
+        file_name=file.filename or "bugreport.zip",
+        file_size=size,
+    )
+    logger.info("bug report #%s imported: %s (%.1f MB)", report["id"], report["title"], size / 1048576)
+    return report
+
+
 def _bug_report_zip_path(report: dict) -> Path:
     path = _PROJECT_ROOT / (report.get("file_path") or "")
     if not report.get("file_path") or not path.is_file():

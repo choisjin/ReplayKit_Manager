@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Popconfirm, Space, Table, Tag, Typography, message } from 'antd';
-import { DeleteOutlined, DownloadOutlined, ReloadOutlined } from '@ant-design/icons';
+import { Button, Popconfirm, Space, Table, Tag, Tooltip, Typography, Upload, message } from 'antd';
+import { DeleteOutlined, DownloadOutlined, ImportOutlined, ReloadOutlined } from '@ant-design/icons';
 import { bugReportApi } from '../services/api';
 import BugReportViewer, { type BugReport } from '../components/BugReportViewer';
 
@@ -22,6 +22,7 @@ function fmtTime(iso: string): string {
 export default function BugReportsPage() {
   const [reports, setReports] = useState<BugReport[]>([]);
   const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [detail, setDetail] = useState<BugReport | null>(null);
 
   const load = useCallback(async () => {
@@ -46,6 +47,26 @@ export default function BugReportsPage() {
         const res = await bugReportApi.updateStatus(r.id, 'reviewed');
         setReports((prev) => prev.map((p) => (p.id === r.id ? res.data : p)));
       } catch { /* 상태 갱신 실패는 무시 */ }
+    }
+  };
+
+  // 로컬 폴백 ZIP 수동 등록 (다중 선택 가능) — 메타는 서버가 report.json 에서 추출
+  const importFiles = async (files: File[]) => {
+    setImporting(true);
+    let ok = 0;
+    for (const f of files) {
+      try {
+        await bugReportApi.importZip(f);
+        ok += 1;
+      } catch (e) {
+        const detail = (e as { response?: { data?: { detail?: string } } }).response?.data?.detail;
+        message.error(`${f.name}: ${detail || '가져오기 실패'}`);
+      }
+    }
+    setImporting(false);
+    if (ok > 0) {
+      message.success(`${ok}건 가져왔습니다`);
+      load();
     }
   };
 
@@ -102,7 +123,23 @@ export default function BugReportsPage() {
             <Tag color="red" style={{ marginLeft: 8 }}>신규 {reports.filter((r) => r.status === 'new').length}건</Tag>
           )}
         </Typography.Title>
-        <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>새로고침</Button>
+        <Space>
+          <Tooltip title="서버에 접근하지 못한 유저가 로컬로 저장한 버그 리포트 ZIP을 등록합니다">
+            <Upload
+              accept=".zip"
+              multiple
+              showUploadList={false}
+              beforeUpload={(file, fileList) => {
+                // 다중 선택 시 파일마다 호출되므로 첫 파일에서 배치 전체를 1회만 처리
+                if (file === fileList[0]) importFiles(fileList as unknown as File[]);
+                return false; // 자동 업로드 차단 — importFiles 가 직접 전송
+              }}
+            >
+              <Button icon={<ImportOutlined />} loading={importing}>ZIP 가져오기</Button>
+            </Upload>
+          </Tooltip>
+          <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>새로고침</Button>
+        </Space>
       </div>
 
       <Table

@@ -40,6 +40,12 @@ export const bugReportApi = {
   updateStatus: (id: number, status: 'new' | 'reviewed') => api.put(`/bug-reports/${id}`, { status }),
   delete: (id: number) => api.delete(`/bug-reports/${id}`),
   downloadUrl: (id: number) => `/api/bug-reports/${id}/download`,
+  // 로컬 폴백 ZIP 수동 등록 — 메타는 ZIP 안 report.json 에서 서버가 추출
+  importZip: (file: File) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post('/bug-reports/import', fd);
+  },
   // ZIP 을 서버가 열어 뷰어용 구조(report/step_tests/playback/files)로 반환
   contents: (id: number) => api.get(`/bug-reports/${id}/contents`),
   // ZIP 안 개별 파일 (이미지 src / 로그 텍스트). maxBytes 지정 시 tail 만
