@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { Badge, Button, Card, Col, Empty, Modal, Progress, Row, Statistic, Tag, Tooltip, Typography, message } from 'antd';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Badge, Button, Card, Col, Empty, Modal, Progress, Row, Segmented, Statistic, Tag, Tooltip, Typography, message } from 'antd';
 import { DeleteOutlined, DesktopOutlined, PlayCircleOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import { agentApi } from '../services/api';
 
@@ -65,8 +65,68 @@ interface Agent {
 }
 interface Summary { total: number; online: number; playing: number; recording: number; }
 
-const ACTIVITY_LABEL: Record<string, string> = { idle: '대기', in_use: '사용중', playing: '재생 중', recording: '녹화 중' };
-const ACTIVITY_COLOR: Record<string, string> = { idle: 'default', in_use: 'blue', playing: 'processing', recording: 'error' };
+// ── 상태(활동) 단일 정의 ──
+// 카드 색 / 태그 / 범례 / 정렬 순서가 **모두 이 표 하나**를 본다. 색을 바꾸려면 여기만 고친다.
+//  - key 는 백엔드 activity(idle/in_use/playing/recording) 에 매니저가 아는 두 가지를
+//    얹은 것: 재생 중 일시정지(paused), 상태 보고 끊김(offline).
+//  - color 는 hex 만 둔다(카드 틴트 계산에 rgba 로 변환해야 해서 antd 프리셋명은 못 쓴다).
+//  - order 는 '상태순' 정렬에서 위로 올라올 순서 — 지금 봐야 하는 것부터.
+type StateKey = 'playing' | 'paused' | 'recording' | 'in_use' | 'idle' | 'offline';
+
+const STATE: Record<StateKey, { label: string; color: string; tag: string; order: number; desc: string }> = {
+  playing:   { label: '재생 중',  color: '#1677ff', tag: 'processing', order: 0, desc: '시나리오 재생 중' },
+  paused:    { label: '일시정지', color: '#faad14', tag: 'warning',    order: 1, desc: '재생 중 일시정지 상태' },
+  recording: { label: '녹화 중',  color: '#ff4d4f', tag: 'error',      order: 2, desc: '시나리오 녹화 중' },
+  in_use:    { label: '사용중',   color: '#52c41a', tag: 'success',    order: 3, desc: 'ReplayKit 창이 최상단 — 사람이 조작 중' },
+  idle:      { label: '대기',     color: '#8c8c8c', tag: 'default',    order: 4, desc: '온라인이지만 재생·녹화·조작 없음' },
+  offline:   { label: '오프라인', color: '#595959', tag: 'default',    order: 5, desc: '45초 이상 상태 보고 없음' },
+};
+const LEGEND_ORDER: StateKey[] = ['playing', 'paused', 'recording', 'in_use', 'idle', 'offline'];
+
+/** 카드 색·태그·정렬의 기준이 되는 단일 상태. */
+function stateOf(a: Agent): StateKey {
+  if (!a.online) return 'offline';
+  if (a.activity === 'playing') return a.playback?.status === 'paused' ? 'paused' : 'playing';
+  if (a.activity === 'recording') return 'recording';
+  if (a.activity === 'in_use') return 'in_use';
+  return 'idle';
+}
+
+/** #rrggbb → rgba(). 반투명 틴트라 라이트/다크 어느 테마 위에 얹혀도 그대로 읽힌다
+ *  (불투명 색을 쓰면 다크 모드에서 글자가 묻힌다). */
+function tint(hex: string, alpha: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+// ── 정렬 ──
+// 기본값은 **연결 순서 고정**(default) — 2초마다 폴링하므로 상태순으로 두면 카드가 계속
+// 자리를 옮겨 눈으로 따라가기 어렵다. 필요할 때만 상태순으로 바꿔 쓰도록 선택지로 둔다.
+type SortKey = 'default' | 'state' | 'name';
+const SORT_KEY = 'fleet_sort';
+const SORT_OPTIONS = [
+  { label: '연결순', value: 'default' },
+  { label: '상태순', value: 'state' },
+  { label: '이름순', value: 'name' },
+];
+
+function agentName(a: Agent): string {
+  return a.name || a.client_id;
+}
+
+function sortAgents(list: Agent[], sort: SortKey): Agent[] {
+  if (sort === 'default') return list;   // 원본(연결 순서) 유지
+  const arr = [...list];
+  if (sort === 'name') {
+    arr.sort((x, y) => agentName(x).localeCompare(agentName(y)));
+  } else {
+    // 상태가 같으면 이름순 — 같은 상태 안에서는 순서가 흔들리지 않는다.
+    arr.sort((x, y) =>
+      STATE[stateOf(x)].order - STATE[stateOf(y)].order ||
+      agentName(x).localeCompare(agentName(y)));
+  }
+  return arr;
+}
 
 // 카드 고정 높이 — 재생 여부/디바이스 수에 따라 크기가 변하지 않게 한다.
 const CARD_HEIGHT = 104;
@@ -167,7 +227,15 @@ export default function FleetPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [summary, setSummary] = useState<Summary>({ total: 0, online: 0, playing: 0, recording: 0 });
   const [loaded, setLoaded] = useState(false);
+  // 정렬 기준은 브라우저에 기억 — 관제 화면은 띄워 두고 쓰는 경우가 많다.
+  const [sort, setSort] = useState<SortKey>(
+    () => (localStorage.getItem(SORT_KEY) as SortKey) || 'default');
   const timer = useRef<number | null>(null);
+
+  const changeSort = (v: SortKey) => {
+    setSort(v);
+    localStorage.setItem(SORT_KEY, v);
+  };
 
   const load = async () => {
     try {
@@ -212,17 +280,31 @@ export default function FleetPage() {
   };
 
   /** 카드 1장 — 상태에 따라 크기가 변하지 않도록 **고정 높이**로 그린다.
-   *  본문은 최소한만 노출하고, 상세는 각 항목 hover 툴팁으로 뺀다. */
+   *  본문은 최소한만 노출하고, 상세는 각 항목 hover 툴팁으로 뺀다.
+   *  상태는 태그뿐 아니라 **카드 전체 색(왼쪽 굵은 띠 + 배경 틴트)** 으로 드러낸다 —
+   *  작은 태그만으로는 수십 장이 깔렸을 때 한눈에 안 들어온다. */
   const renderCard = (a: Agent) => {
     const pb = a.playback;
     const cycleTotal = pb?.total_cycles || 0;
     const cyclePct = cycleTotal > 0 ? Math.round((pb!.current_cycle / cycleTotal) * 100) : 0;
+    const st = stateOf(a);
+    const c = STATE[st].color;
+    // 대기/오프라인은 틴트를 옅게 — 활동 중인 PC 가 상대적으로 튀어 보이게 한다.
+    const quiet = st === 'idle' || st === 'offline';
     return (
       <Col xs={24} sm={12} md={8} lg={6} xxl={4} key={a.client_id}>
         <Card
           size="small"
           bodyStyle={{ padding: '8px 10px' }}
-          style={{ height: CARD_HEIGHT, overflow: 'hidden', opacity: a.online ? 1 : 0.6 }}
+          style={{
+            height: CARD_HEIGHT,
+            overflow: 'hidden',
+            opacity: a.online ? 1 : 0.6,
+            background: tint(c, quiet ? 0.05 : 0.14),
+            borderColor: tint(c, quiet ? 0.25 : 0.45),
+            borderLeft: `4px solid ${quiet ? tint(c, 0.5) : c}`,
+            boxShadow: quiet ? undefined : `0 2px 8px ${tint(c, 0.22)}`,
+          }}
         >
           {/* 1행 — 상태점 + 호스트명(말줄임) + OS + 삭제(오프라인만) */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
@@ -248,9 +330,11 @@ export default function FleetPage() {
 
           {/* 2행 — 활동 / 디바이스 수 / UI 모드 (상세는 모두 hover) */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 6 }}>
-            <Tag color={ACTIVITY_COLOR[a.activity] || 'default'} style={MINI_TAG}>
-              {ACTIVITY_LABEL[a.activity] || a.activity}
-            </Tag>
+            <Tooltip title={STATE[st].desc}>
+              <Tag color={STATE[st].tag} style={{ ...MINI_TAG, cursor: 'default' }}>
+                {STATE[st].label}
+              </Tag>
+            </Tooltip>
             <Tooltip title={deviceTooltip(a)}>
               <Tag style={{ ...MINI_TAG, cursor: 'default' }}>
                 {a.connected_device_count}/{a.device_count}
@@ -288,8 +372,17 @@ export default function FleetPage() {
     );
   };
 
-  const onlineAgents = agents.filter(a => a.online);
-  const offlineAgents = agents.filter(a => !a.online);
+  // 2초 폴링마다 재정렬되므로 memo — agents/sort 가 바뀔 때만 계산한다.
+  const onlineAgents = useMemo(
+    () => sortAgents(agents.filter(a => a.online), sort), [agents, sort]);
+  const offlineAgents = useMemo(
+    () => sortAgents(agents.filter(a => !a.online), sort), [agents, sort]);
+  // 범례에 상태별 대수도 같이 — 색이 무슨 뜻인지 + 지금 몇 대인지 한 줄에서 읽힌다.
+  const stateCount = useMemo(() => {
+    const m = {} as Record<StateKey, number>;
+    agents.forEach(a => { const k = stateOf(a); m[k] = (m[k] || 0) + 1; });
+    return m;
+  }, [agents]);
 
   return (
     <div>
@@ -304,16 +397,48 @@ export default function FleetPage() {
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col xs={12} sm={6}><Card size="small"><Statistic title="전체 PC" value={summary.total} /></Card></Col>
         <Col xs={12} sm={6}><Card size="small"><Statistic title="온라인" value={summary.online} valueStyle={{ color: '#52c41a' }} /></Card></Col>
-        <Col xs={12} sm={6}><Card size="small"><Statistic title="재생 중" value={summary.playing} valueStyle={{ color: '#1677ff' }} prefix={<PlayCircleOutlined />} /></Card></Col>
-        <Col xs={12} sm={6}><Card size="small"><Statistic title="녹화 중" value={summary.recording} valueStyle={{ color: '#cf1322' }} prefix={<VideoCameraOutlined />} /></Card></Col>
+        {/* 색은 카드/범례와 같은 STATE 표에서 가져온다 — 요약과 카드 색이 어긋나지 않게. */}
+        <Col xs={12} sm={6}><Card size="small"><Statistic title="재생 중" value={summary.playing} valueStyle={{ color: STATE.playing.color }} prefix={<PlayCircleOutlined />} /></Card></Col>
+        <Col xs={12} sm={6}><Card size="small"><Statistic title="녹화 중" value={summary.recording} valueStyle={{ color: STATE.recording.color }} prefix={<VideoCameraOutlined />} /></Card></Col>
       </Row>
+
+      {/* 범례(카드 색의 의미 + 상태별 대수) / 정렬 */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 12,
+        flexWrap: 'wrap', marginBottom: 12,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flex: 1 }}>
+          {LEGEND_ORDER.map(k => (
+            <Tooltip key={k} title={STATE[k].desc}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, cursor: 'default' }}>
+                <span style={{
+                  width: 10, height: 10, borderRadius: 3,
+                  background: STATE[k].color, display: 'inline-block',
+                }} />
+                {STATE[k].label}
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {stateCount[k] || 0}
+                </Typography.Text>
+              </span>
+            </Tooltip>
+          ))}
+        </div>
+        <Tooltip title="연결순 = 접속한 순서 고정(카드가 자리를 옮기지 않음) · 상태순 = 재생 중부터 위로">
+          <Segmented
+            size="small"
+            value={sort}
+            onChange={(v) => changeSort(v as SortKey)}
+            options={SORT_OPTIONS}
+          />
+        </Tooltip>
+      </div>
 
       {agents.length === 0 ? (
         <Empty description={loaded ? '연결된 테스트 PC 없음 — ReplayKit 설정에서 관제 서버 URL 을 이 서버로 지정하세요' : '로딩 중...'} />
       ) : (
         <>
-          {/* 활성 / 비활성을 크게 나눠 표시. 각 섹션 내 순서는 **연결 순서 고정**이라
-              온라인/오프라인이 바뀌어도 카드가 자리를 옮기지 않는다. */}
+          {/* 활성 / 비활성을 크게 나눠 표시. 섹션 내 순서는 정렬 선택(sort)을 따르고,
+              기본값 '연결순' 에서는 온라인/오프라인이 바뀌어도 카드가 자리를 옮기지 않는다. */}
           <Typography.Title level={5} style={{ margin: '4px 0 8px' }}>
             <Badge status="success" /> 활성 <Typography.Text type="secondary">({onlineAgents.length})</Typography.Text>
           </Typography.Title>
