@@ -11,6 +11,7 @@ import sys
 import threading
 import uuid
 import webbrowser
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -19,7 +20,7 @@ import time
 from fastapi import FastAPI, File, Form, Query, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pathlib import Path
 from pydantic import BaseModel
 from typing import Optional
@@ -902,6 +903,99 @@ async def update_bug_report(report_id: int, req: BugReportStatusUpdate):
     if not report:
         raise HTTPException(status_code=404, detail="버그 리포트를 찾을 수 없습니다")
     return report
+
+
+def _bug_report_zip_path(report: dict) -> Path:
+    path = _PROJECT_ROOT / (report.get("file_path") or "")
+    if not report.get("file_path") or not path.is_file():
+        raise HTTPException(status_code=404, detail="첨부 파일이 없습니다")
+    return path
+
+
+# ZIP 안 상대경로(루트 폴더 제외) → 표준 구성요소 파싱용
+def _zip_rel(name: str) -> str:
+    parts = name.split("/", 1)
+    return parts[1] if len(parts) > 1 else parts[0]
+
+
+@app.get("/api/bug-reports/{report_id}/contents")
+async def bug_report_contents(report_id: int):
+    """리포트 ZIP을 서버에서 열어 뷰어용 구조로 반환.
+
+    report.json / step_tests/records.json / results/*/range_steps.json 은
+    파싱해서 내려주고, 나머지(이미지·로그)는 파일 목록만 준다 —
+    개별 파일 본문은 GET /file?path= 로 지연 로드.
+    """
+    report = await db.get_bug_report(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="버그 리포트를 찾을 수 없습니다")
+    path = _bug_report_zip_path(report)
+
+    def _read():
+        out = {"files": [], "report": None, "step_tests": None, "playback": {}}
+        with zipfile.ZipFile(path) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                rel = _zip_rel(info.filename)
+                out["files"].append({"path": info.filename, "rel": rel, "size": info.file_size})
+                try:
+                    if rel == "report.json":
+                        out["report"] = json.loads(zf.read(info))
+                    elif rel == "step_tests/records.json":
+                        out["step_tests"] = json.loads(zf.read(info))
+                    elif rel.startswith("results/") and rel.endswith("/range_steps.json"):
+                        run = rel.split("/")[1]
+                        out["playback"][run] = json.loads(zf.read(info))
+                except (json.JSONDecodeError, KeyError):
+                    pass  # 손상된 항목은 파일 목록만 남긴다
+        return out
+
+    return await asyncio.to_thread(_read)
+
+
+_ZIP_MEDIA_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".json": "application/json; charset=utf-8",
+}
+
+
+@app.get("/api/bug-reports/{report_id}/file")
+async def bug_report_file(report_id: int, path: str, max_bytes: int = 0):
+    """ZIP 안 개별 파일 서빙 (이미지/로그 뷰어용).
+
+    max_bytes > 0 이면 tail 만 반환 (대형 로그 뷰어 보호).
+    """
+    report = await db.get_bug_report(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="버그 리포트를 찾을 수 없습니다")
+    zip_path = _bug_report_zip_path(report)
+
+    def _read():
+        with zipfile.ZipFile(zip_path) as zf:
+            try:
+                info = zf.getinfo(path)
+            except KeyError:
+                raise HTTPException(status_code=404, detail="ZIP 안에 해당 파일이 없습니다")
+            data = zf.read(info)
+        return data, info.file_size
+
+    data, full_size = await asyncio.to_thread(_read)
+    truncated = False
+    if max_bytes and len(data) > max_bytes:
+        data = data[-max_bytes:]
+        truncated = True
+    suffix = Path(path).suffix.lower()
+    media = _ZIP_MEDIA_TYPES.get(suffix, "text/plain; charset=utf-8")
+    return Response(
+        content=data,
+        media_type=media,
+        headers={
+            "Cache-Control": "private, max-age=3600",  # ZIP 은 불변이라 캐시 안전
+            "X-Full-Size": str(full_size),
+            "X-Truncated": "1" if truncated else "0",
+        },
+    )
 
 
 @app.delete("/api/bug-reports/{report_id}")

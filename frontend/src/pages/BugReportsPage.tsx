@@ -1,25 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Descriptions, Modal, Popconfirm, Space, Table, Tag, Typography, message } from 'antd';
+import { Button, Popconfirm, Space, Table, Tag, Typography, message } from 'antd';
 import { DeleteOutlined, DownloadOutlined, ReloadOutlined } from '@ant-design/icons';
 import { bugReportApi } from '../services/api';
-
-const { Text, Paragraph } = Typography;
-
-interface BugReport {
-  id: number;
-  title: string;
-  description: string;
-  reporter: string;
-  version: string;
-  boot_id: string;
-  platform: string;
-  hostname: string;
-  client_created_at: string;
-  received_at: string;
-  file_name: string;
-  file_size: number;
-  status: 'new' | 'reviewed';
-}
+import BugReportViewer, { type BugReport } from '../components/BugReportViewer';
 
 function fmtSize(bytes: number): string {
   if (!bytes) return '-';
@@ -131,35 +114,7 @@ export default function BugReportsPage() {
         pagination={{ pageSize: 20, showSizeChanger: false }}
       />
 
-      <Modal
-        title={detail?.title}
-        open={!!detail}
-        onCancel={() => setDetail(null)}
-        footer={[
-          <Button key="dl" type="primary" icon={<DownloadOutlined />} href={detail ? bugReportApi.downloadUrl(detail.id) : '#'} target="_blank">
-            ZIP 다운로드 ({fmtSize(detail?.file_size || 0)})
-          </Button>,
-          <Button key="close" onClick={() => setDetail(null)}>닫기</Button>,
-        ]}
-        width={640}
-      >
-        {detail && (
-          <>
-            <Descriptions column={2} size="small" bordered style={{ marginBottom: 12 }}>
-              <Descriptions.Item label="제보자">{detail.reporter || '-'}</Descriptions.Item>
-              <Descriptions.Item label="호스트">{detail.hostname || '-'}</Descriptions.Item>
-              <Descriptions.Item label="버전">{detail.version || '-'}</Descriptions.Item>
-              <Descriptions.Item label="플랫폼">{detail.platform || '-'}</Descriptions.Item>
-              <Descriptions.Item label="클라이언트 생성">{fmtTime(detail.client_created_at)}</Descriptions.Item>
-              <Descriptions.Item label="서버 수신">{fmtTime(detail.received_at)}</Descriptions.Item>
-            </Descriptions>
-            <Text strong>증상 설명</Text>
-            <Paragraph style={{ whiteSpace: 'pre-wrap', marginTop: 4 }}>
-              {detail.description || <Text type="secondary">(설명 없음)</Text>}
-            </Paragraph>
-          </>
-        )}
-      </Modal>
+      <BugReportViewer report={detail} onClose={() => setDetail(null)} />
     </div>
   );
 }
