@@ -135,7 +135,9 @@ export default function FunctionStatsPage() {
           value={unusedFilter} onChange={(e) => setUnusedFilter(e.target.value)} />}>
         <Typography.Paragraph type="secondary" style={{ fontSize: 11, marginBottom: 8 }}>
           어떤 테스트 PC 의 시나리오에서도 module_command 로 한 번도 호출되지 않은 함수입니다.
-          (전용 스텝 타입으로 제공되는 tap/swipe 등은 카탈로그에서 이미 제외.)
+          대조 카탈로그는 <b>각 PC 에서 활성화된(디바이스로 등록된) 모듈</b>만 모은 것이라,
+          어느 PC 에도 장비가 없는 모듈은 애초에 여기 올라오지 않습니다.
+          (전용 스텝 타입으로 제공되는 tap/swipe 등, <code>#test</code> 전용 실험 모듈도 제외.)
         </Typography.Paragraph>
         {Object.keys(unusedByModule).length > 0 && (
           <div style={{ marginBottom: 10, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
