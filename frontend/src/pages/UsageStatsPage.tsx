@@ -46,14 +46,14 @@ const TZ_OFF = -new Date().getTimezoneOffset() * 60;
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 
-/** 버킷 크기에 맞춘 x축 라벨. 자정은 날짜, 정시는 "14시", 분 단위는 "14:30". */
+/** 버킷 크기에 맞춘 x축 라벨 — 날짜와 시각을 **함께** 표기한다.
+ *  시각만 쓰면 길게 스크롤했을 때 지금 보는 구간이 며칠인지 알 수 없다. */
 function bucketLabel(t: number, bucketSec: number): string {
   const d = new Date(t * 1000);
-  if (bucketSec >= 86400 || (d.getHours() === 0 && d.getMinutes() === 0)) {
-    return `${d.getMonth() + 1}/${d.getDate()}`;
-  }
-  if (bucketSec < 3600) return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  return `${pad2(d.getHours())}시`;
+  const day = `${d.getMonth() + 1}/${d.getDate()}`;
+  if (bucketSec >= 86400) return day;
+  if (bucketSec < 3600) return `${day} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return `${day} ${pad2(d.getHours())}시`;
 }
 
 function bucketTip(t: number, bucketSec: number): string {
@@ -66,11 +66,17 @@ function bucketTip(t: number, bucketSec: number): string {
   return `${day(s)} ${hm(s)} ~ ${hm(e)}`;
 }
 
-/** 라벨 간격(버킷 수) — 라벨끼리 최소 ~72px 은 떨어지도록. 정각/자정 등
- *  '깔끔한' 시각에 라벨이 붙게 시간 기준으로 거른다. */
+/** 라벨 간격(버킷 수) — 라벨끼리 최소 ~90px 은 떨어지도록(날짜+시각을 함께 쓰므로
+ *  라벨이 길다). 정각/자정 등 '깔끔한' 시각에 라벨이 붙게 시간 기준으로 거른다. */
 function labelStep(): number {
-  const need = Math.ceil(72 / CELL);
+  const need = Math.ceil(90 / CELL);
   return [1, 2, 3, 4, 6, 8, 12, 24, 48].find(s => s >= need) ?? 48;
+}
+
+// 기간 표기는 날짜만이 아니라 시각까지 — "언제부터 언제까지"가 정확히 보이게.
+function fmtDayTime(ts: number): string {
+  const d = new Date(ts * 1000);
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 function sum(c: Counts, keys: StateKey[] = STATE_ORDER): number {
@@ -288,6 +294,65 @@ export default function UsageStatsPage() {
   const avgOnline = ticks > 0 ? onlineSamples / ticks : 0;
   const utilization = onlineSamples > 0 ? (activeSamples / onlineSamples) * 100 : 0;
 
+  /** 그래프 자동 해석 — 숫자를 문장으로 풀어 요약한다.
+   *  피크 탐색은 줌과 무관하게 **1시간 스케일 고정**으로 계산한다(줌을 바꿀 때마다
+   *  요약이 달라지면 해석이 아니라 화면 설명이 되어 버린다). */
+  const summaryLines = useMemo(() => {
+    if (!data || ticks === 0) return [];
+    const lines: string[] = [];
+
+    // 기간 길이
+    const spanSec = Math.max(0, data.now - data.since);
+    const spanTxt = spanSec < 86400
+      ? `약 ${(spanSec / 3600).toFixed(1)}시간`
+      : `약 ${(spanSec / 86400).toFixed(1)}일`;
+    lines.push(
+      `${fmtDayTime(data.since)} ~ ${fmtDayTime(data.now)} (${spanTxt}) 동안 평균 ${avgOnline.toFixed(1)}대가 온라인이었고, `
+      + `온라인 시간의 ${utilization.toFixed(1)}% 를 재생·녹화·조작에 사용했습니다.`);
+
+    // 동시 재생 피크 (1시간 버킷 기준)
+    const hourSec = Math.max(3600, data.bucket_sec);
+    let peak: { t: number; v: number } | null = null;
+    for (const b of rebucket(data.buckets, data.bucket_sec, hourSec)) {
+      if (b.ticks === 0) continue;
+      const v = ((b.counts.playing || 0) + (b.counts.paused || 0)) / b.ticks;
+      if (v > 0 && (!peak || v > peak.v)) peak = { t: b.t, v };
+    }
+    if (peak) {
+      lines.push(
+        `동시 재생이 가장 많았던 때는 ${bucketLabel(peak.t, hourSec)} 로, 평균 ${peak.v.toFixed(1)}대가 재생 중이었습니다.`);
+    } else {
+      lines.push('집계 기간 동안 시나리오 재생 기록이 없습니다.');
+    }
+
+    // 하루 중 가장 많이 쓰는 시간대 (기간 전체를 하루로 접은 평균)
+    const hourAvg = data.hours
+      .filter(h => h.ticks > 0)
+      .map(h => ({ hour: h.hour, v: sum(h.counts, ACTIVE_STATES) / h.ticks }));
+    const busiest = hourAvg.reduce<{ hour: number; v: number } | null>(
+      (a, b) => (b.v > (a?.v ?? 0) ? b : a), null);
+    if (busiest && busiest.v > 0) {
+      lines.push(`하루 중에는 ${busiest.hour}시대 사용이 가장 많습니다 (기간 평균 ${busiest.v.toFixed(1)}대 가동).`);
+    }
+
+    // PC 랭킹 — 가동률 1위 / 재생 시간 1위
+    const agents = data.agents || [];
+    const topUtil = agents.reduce<AgentTotals | null>(
+      (a, b) => (utilOf(b) > (a ? utilOf(a) : 0) ? b : a), null);
+    if (topUtil && utilOf(topUtil) > 0) {
+      lines.push(`가동률이 가장 높은 PC 는 ${topUtil.name} (${Math.round(utilOf(topUtil))}%) 입니다.`);
+    }
+    const playOf = (a: AgentTotals) => (a.counts.playing || 0) + (a.counts.paused || 0);
+    const topPlay = agents.reduce<AgentTotals | null>(
+      (a, b) => (playOf(b) > (a ? playOf(a) : 0) ? b : a), null);
+    if (topPlay && playOf(topPlay) > 0 && topPlay !== topUtil) {
+      lines.push(
+        `재생 시간이 가장 긴 PC 는 ${topPlay.name} (${hoursOf(playOf(topPlay), data.sample_interval_sec || 60)}) 입니다.`);
+    }
+    return lines;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, ticks, avgOnline, utilization]);
+
   const columns = [
     {
       title: 'PC', dataIndex: 'name', key: 'name', width: 160, ellipsis: true,
@@ -359,11 +424,6 @@ export default function UsageStatsPage() {
   const slice = timeline.slice(sliceStart, sliceStart + view.count);
   const padLeft = sliceStart * CELL;
   const padRight = Math.max(0, (timeline.length - sliceStart - slice.length) * CELL);
-
-  const fmtDay = (ts: number) => {
-    const d = new Date(ts * 1000);
-    return `${d.getMonth() + 1}/${d.getDate()}`;
-  };
 
   return (
     <div>
@@ -459,10 +519,21 @@ export default function UsageStatsPage() {
         </Col>
       </Row>
 
+      {/* 그래프 해석 요약 — 그래프에서 읽어야 할 결론을 문장으로 먼저 보여준다 */}
+      {summaryLines.length > 0 && (
+        <Card size="small" style={{ marginBottom: 16 }}
+          title={<span style={{ fontSize: 13 }}>요약 — 그래프 해석</span>}
+        >
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 2.1 }}>
+            {summaryLines.map((s, i) => <li key={i}>{s}</li>)}
+          </ul>
+        </Card>
+      )}
+
       <Card size="small" style={{ marginBottom: 16 }}
         title={
           <span style={{ fontSize: 13 }}>
-            상태 추이{data ? ` (${fmtDay(data.since)} ~ ${fmtDay(data.now)} 전체)` : ''}
+            상태 추이{data ? ` (${fmtDayTime(data.since)} ~ ${fmtDayTime(data.now)})` : ''}
           </span>
         }
         extra={<StateLegend />}
