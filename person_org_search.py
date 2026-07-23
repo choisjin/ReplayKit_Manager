@@ -50,7 +50,8 @@ def parse_display_name(display_name: str) -> dict:
     return result
 
 
-def search_users(jira, keyword: str, max_results: int | None = None) -> list[dict]:
+def search_users(jira, keyword: str, max_results: int | None = None,
+                 batch: int = 1000) -> list[dict]:
     """
     키워드로 Jira 사용자를 검색합니다.
     displayName에 조직명이 포함되므로 팀명(예: "검증자동화팀")으로도 검색 가능합니다.
@@ -58,24 +59,42 @@ def search_users(jira, keyword: str, max_results: int | None = None) -> list[dic
     max_results가 None이면 제한 없이 전체를 가져옵니다.
     이름(displayName)이 없는 계정은 결과에서 제외합니다.
 
+    참고: jira 라이브러리의 search_users는 배열 응답 API에서 첫 페이지만
+    가져오는 문제가 있어, user/search REST를 직접 호출해 페이지네이션합니다.
+
     반환: 사용자별 {"name", "title", "team", "display_name", "user_id"} dict 리스트
     """
-    if not keyword or not keyword.strip():
+    keyword = (keyword or "").strip()
+    if not keyword:
         return []
 
-    # maxResults=False → 페이지 단위로 전체 조회 (jira 라이브러리 동작)
-    users = jira.search_users(keyword.strip(), maxResults=max_results or False)
-
     results = []
-    for user in users:
-        display_name = getattr(user, "displayName", "") or ""
-        info = parse_display_name(display_name)
-        if not info["name"]:  # 이름 없는 계정 제외
-            continue
-        info["display_name"] = display_name
-        info["user_id"] = getattr(user, "name", "") or ""  # Jira Server 계정 ID
-        results.append(info)
-    return results
+    seen = set()
+    start = 0
+    while max_results is None or len(results) < max_results:
+        page = jira._get_json(
+            "user/search",
+            params={"username": keyword, "startAt": start, "maxResults": batch})
+        if not page:
+            break
+        for user in page:
+            display_name = user.get("displayName") or ""
+            info = parse_display_name(display_name)
+            if not info["name"]:  # 이름 없는 계정 제외
+                continue
+            user_id = user.get("name") or user.get("key") or ""  # Jira Server 계정 ID
+            dedup_key = user_id or display_name
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            info["display_name"] = display_name
+            info["user_id"] = user_id
+            results.append(info)
+        if len(page) < batch:
+            break
+        start += len(page)
+
+    return results if max_results is None else results[:max_results]
 
 
 def fetch_group_users(jira, group_name: str = "jira-users") -> list[dict]:
