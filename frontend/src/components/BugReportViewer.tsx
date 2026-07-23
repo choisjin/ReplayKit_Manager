@@ -5,8 +5,8 @@ import { bugReportApi } from '../services/api';
 
 const { Text, Paragraph } = Typography;
 
-// 버그 리포트 처리 상태 — 신규 → 처리중 → 확인됨
-export type BugStatus = 'new' | 'in_progress' | 'reviewed';
+// 버그 리포트 처리 상태 — 신규 → 처리중 → 확인됨 → 처리완료
+export type BugStatus = 'new' | 'in_progress' | 'reviewed' | 'done';
 
 export interface BugReport {
   id: number;

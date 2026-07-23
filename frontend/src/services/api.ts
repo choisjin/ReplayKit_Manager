@@ -47,7 +47,7 @@ export const agentApi = {
 
 export const bugReportApi = {
   list: () => api.get('/bug-reports'),
-  updateStatus: (id: number, status: 'new' | 'in_progress' | 'reviewed') =>
+  updateStatus: (id: number, status: 'new' | 'in_progress' | 'reviewed' | 'done') =>
     api.put(`/bug-reports/${id}`, { status }),
   delete: (id: number) => api.delete(`/bug-reports/${id}`),
   downloadUrl: (id: number) => `/api/bug-reports/${id}/download`,

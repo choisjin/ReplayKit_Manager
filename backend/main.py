@@ -1042,10 +1042,10 @@ async def download_bug_report(report_id: int):
 
 
 class BugReportStatusUpdate(BaseModel):
-    status: str  # 'new' | 'in_progress' | 'reviewed'
+    status: str  # 'new' | 'in_progress' | 'reviewed' | 'done'
 
 
-_BUG_REPORT_STATUSES = ("new", "in_progress", "reviewed")
+_BUG_REPORT_STATUSES = ("new", "in_progress", "reviewed", "done")
 
 
 @app.put("/api/bug-reports/{report_id}")

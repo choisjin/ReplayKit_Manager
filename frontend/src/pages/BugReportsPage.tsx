@@ -9,6 +9,7 @@ const STATUS_OPTIONS: { value: BugStatus; label: string; color: string }[] = [
   { value: 'new', label: '신규', color: 'red' },
   { value: 'in_progress', label: '처리중', color: 'gold' },
   { value: 'reviewed', label: '확인됨', color: 'green' },
+  { value: 'done', label: '처리완료', color: 'blue' },
 ];
 
 // "2026. 07. 22. 15:05:05" — 한 줄로 표시
