@@ -47,7 +47,8 @@ export const agentApi = {
 
 export const bugReportApi = {
   list: () => api.get('/bug-reports'),
-  updateStatus: (id: number, status: 'new' | 'reviewed') => api.put(`/bug-reports/${id}`, { status }),
+  updateStatus: (id: number, status: 'new' | 'in_progress' | 'reviewed') =>
+    api.put(`/bug-reports/${id}`, { status }),
   delete: (id: number) => api.delete(`/bug-reports/${id}`),
   downloadUrl: (id: number) => `/api/bug-reports/${id}/download`,
   // 로컬 폴백 ZIP 수동 등록 — 메타는 ZIP 안 report.json 에서 서버가 추출

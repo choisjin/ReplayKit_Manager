@@ -1,26 +1,29 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Popconfirm, Space, Table, Tag, Tooltip, Typography, Upload, message } from 'antd';
+import { Button, Popconfirm, Select, Space, Table, Tag, Tooltip, Typography, Upload, message } from 'antd';
 import { DeleteOutlined, DownloadOutlined, ImportOutlined, ReloadOutlined } from '@ant-design/icons';
 import { bugReportApi } from '../services/api';
-import BugReportViewer, { type BugReport } from '../components/BugReportViewer';
+import BugReportViewer, { type BugReport, type BugStatus } from '../components/BugReportViewer';
 
-function fmtSize(bytes: number): string {
-  if (!bytes) return '-';
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / 1048576).toFixed(1)} MB`;
-}
+// 처리 상태 — 신규 → 처리중 → 확인됨. label/color 를 한 곳에서 관리한다.
+const STATUS_OPTIONS: { value: BugStatus; label: string; color: string }[] = [
+  { value: 'new', label: '신규', color: 'red' },
+  { value: 'in_progress', label: '처리중', color: 'gold' },
+  { value: 'reviewed', label: '확인됨', color: 'green' },
+];
 
-// "2026. 07. 22." / "15:05:05" — 목록에서는 2줄로 표시
-function fmtDateTimeParts(iso: string): [string, string] | null {
-  if (!iso) return null;
+// "2026. 07. 22. 15:05:05" — 한 줄로 표시
+function fmtDateTime(iso: string): string {
+  if (!iso) return '-';
   const d = new Date(iso);
-  if (isNaN(d.getTime())) return null;
+  if (isNaN(d.getTime())) return '-';
   const p = (n: number) => String(n).padStart(2, '0');
-  return [
-    `${d.getFullYear()}. ${p(d.getMonth() + 1)}. ${p(d.getDate())}.`,
-    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`,
-  ];
+  return `${d.getFullYear()}. ${p(d.getMonth() + 1)}. ${p(d.getDate())}. ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+
+// 모든 열의 헤더를 가운데 정렬 (본문 정렬은 각 열이 정함)
+const centerHeader = () => ({ style: { textAlign: 'center' as const } });
+// 본문 셀을 한 줄로 — 말줄임(...) 없이 전체 값이 보이도록 (넘치면 표가 가로 스크롤)
+const nowrapCell = () => ({ style: { whiteSpace: 'nowrap' as const } });
 
 export default function BugReportsPage() {
   const [reports, setReports] = useState<BugReport[]>([]);
@@ -44,12 +47,23 @@ export default function BugReportsPage() {
 
   const openDetail = async (r: BugReport) => {
     setDetail(r);
-    // 열람 시 자동으로 reviewed 처리
+    // 열람 시 신규 → 처리중으로 자동 전환 (읽었지만 아직 확인 완료 전).
+    // 확인 완료는 사용자가 상태 드롭다운에서 직접 '확인됨' 으로 바꾼다.
     if (r.status === 'new') {
       try {
-        const res = await bugReportApi.updateStatus(r.id, 'reviewed');
+        const res = await bugReportApi.updateStatus(r.id, 'in_progress');
         setReports((prev) => prev.map((p) => (p.id === r.id ? res.data : p)));
       } catch { /* 상태 갱신 실패는 무시 */ }
+    }
+  };
+
+  // 상태 드롭다운에서 직접 변경
+  const changeStatus = async (r: BugReport, status: BugStatus) => {
+    try {
+      const res = await bugReportApi.updateStatus(r.id, status);
+      setReports((prev) => prev.map((p) => (p.id === r.id ? res.data : p)));
+    } catch {
+      message.error('상태 변경 실패');
     }
   };
 
@@ -85,44 +99,58 @@ export default function BugReportsPage() {
 
   const columns = [
     {
-      title: '상태', dataIndex: 'status', width: 80,
-      render: (v: string) => v === 'new'
-        ? <Tag color="red">신규</Tag>
-        : <Tag color="default">확인됨</Tag>,
+      title: '상태', dataIndex: 'status', align: 'center' as const,
+      onHeaderCell: centerHeader, onCell: nowrapCell,
+      render: (v: BugStatus, r: BugReport) => (
+        <Select<BugStatus>
+          size="small"
+          variant="borderless"
+          value={v}
+          onChange={(val) => changeStatus(r, val)}
+          style={{ width: 88 }}
+          options={STATUS_OPTIONS.map((o) => ({
+            value: o.value,
+            label: <Tag color={o.color} style={{ marginRight: 0 }}>{o.label}</Tag>,
+          }))}
+        />
+      ),
     },
     {
-      title: '제목', dataIndex: 'title', ellipsis: true,
+      title: '수신 시각', dataIndex: 'received_at', align: 'center' as const,
+      onHeaderCell: centerHeader, onCell: nowrapCell,
+      render: (v: string) => fmtDateTime(v),
+    },
+    {
+      title: '제목', dataIndex: 'title',
+      onHeaderCell: centerHeader, onCell: nowrapCell,
       render: (v: string, r: BugReport) => <a onClick={() => openDetail(r)}>{v}</a>,
     },
     {
-      title: '제보자', dataIndex: 'reporter', width: 120, ellipsis: true,
+      title: '제보자', dataIndex: 'reporter',
+      onHeaderCell: centerHeader, onCell: nowrapCell,
       render: (v: string, r: BugReport) => r.user_name || v || '-',
     },
     {
-      title: '부서', dataIndex: 'user_team', width: 130, ellipsis: true,
+      title: '부서', dataIndex: 'user_team',
+      onHeaderCell: centerHeader, onCell: nowrapCell,
       render: (v: string) => v || '-',
     },
     {
-      title: '프로젝트', dataIndex: 'project', width: 90, ellipsis: true,
+      title: '프로젝트', dataIndex: 'project',
+      onHeaderCell: centerHeader, onCell: nowrapCell,
       render: (v: string) => v || '-',
     },
-    { title: '호스트', dataIndex: 'hostname', width: 130, ellipsis: true },
-    { title: '버전', dataIndex: 'version', width: 90 },
     {
-      title: '수신 시각', dataIndex: 'received_at', width: 120,
-      render: (v: string) => {
-        const parts = fmtDateTimeParts(v);
-        return parts ? (
-          <div style={{ lineHeight: 1.4 }}>
-            <div>{parts[0]}</div>
-            <div>{parts[1]}</div>
-          </div>
-        ) : '-';
-      },
+      title: '호스트', dataIndex: 'hostname',
+      onHeaderCell: centerHeader, onCell: nowrapCell,
     },
-    { title: '크기', dataIndex: 'file_size', width: 90, render: fmtSize },
     {
-      title: '', key: 'actions', width: 110,
+      title: '버전', dataIndex: 'version', align: 'center' as const,
+      onHeaderCell: centerHeader, onCell: nowrapCell,
+    },
+    {
+      title: '', key: 'actions', align: 'center' as const, width: 110,
+      onHeaderCell: centerHeader, onCell: nowrapCell,
       render: (_: unknown, r: BugReport) => (
         <Space>
           <Button
@@ -172,7 +200,9 @@ export default function BugReportsPage() {
         dataSource={reports}
         columns={columns}
         loading={loading}
-        size="middle"
+        size="small"
+        // 한 줄 셀이 넘칠 때 잘리지 않고 가로 스크롤로 전체가 보이도록
+        scroll={{ x: 'max-content' }}
         pagination={{ pageSize: 20, showSizeChanger: false }}
       />
 

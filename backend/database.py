@@ -91,7 +91,7 @@ def init_db():
             file_path TEXT,               -- 프로젝트 루트 기준 상대경로
             file_name TEXT,               -- 원본 업로드 파일명
             file_size INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'new'     -- 'new' | 'reviewed'
+            status TEXT DEFAULT 'new'     -- 'new' | 'in_progress' | 'reviewed'
         );
 
         -- 서버 설정 키-값 저장소 (Jira 계정, 프로젝트 목록 등).

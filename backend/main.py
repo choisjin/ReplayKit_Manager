@@ -1042,13 +1042,19 @@ async def download_bug_report(report_id: int):
 
 
 class BugReportStatusUpdate(BaseModel):
-    status: str  # 'new' | 'reviewed'
+    status: str  # 'new' | 'in_progress' | 'reviewed'
+
+
+_BUG_REPORT_STATUSES = ("new", "in_progress", "reviewed")
 
 
 @app.put("/api/bug-reports/{report_id}")
 async def update_bug_report(report_id: int, req: BugReportStatusUpdate):
-    if req.status not in ("new", "reviewed"):
-        raise HTTPException(status_code=400, detail="status must be 'new' or 'reviewed'")
+    if req.status not in _BUG_REPORT_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"status must be one of {_BUG_REPORT_STATUSES}",
+        )
     report = await db.update_bug_report_status(report_id, req.status)
     if not report:
         raise HTTPException(status_code=404, detail="버그 리포트를 찾을 수 없습니다")
