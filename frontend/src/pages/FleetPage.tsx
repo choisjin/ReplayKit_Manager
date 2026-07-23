@@ -101,6 +101,14 @@ function groupKey(v: string | undefined): string {
   return v ? `0${v}` : '1';
 }
 
+/** 필터 Select 를 내용(가장 긴 옵션/placeholder)에 맞춰 폭 계산.
+ *  고정폭이면 긴 부서명이 잘리므로, 글자 수 기반으로 폭을 잡고 너무 길면 상한을 둔다.
+ *  (한글은 소형 폰트에서 대략 13px/자, 화살표·clear·좌우패딩에 약 52px 여유) */
+function fitSelectWidth(options: string[], placeholder: string): number {
+  const longest = Math.max(placeholder.length, ...options.map(o => o.length), 0);
+  return Math.min(340, Math.max(96, longest * 13 + 52));
+}
+
 function sortAgents(list: Agent[], sort: SortKey): Agent[] {
   if (sort === 'default') return list;   // 원본(연결 순서) 유지
   const arr = [...list];
@@ -512,7 +520,9 @@ export default function FleetPage() {
         <div style={{ flex: 1, minWidth: 0 }}><StateLegend counts={stateCount} /></div>
         {/* 부서/프로젝트 필터 — 로그인 사용자 정보 기준 (미로그인 PC 는 필터 시 제외) */}
         <Select
-          size="small" style={{ minWidth: 130 }} allowClear
+          size="small" style={{ width: fitSelectWidth(teamOptions, '부서 전체') }} allowClear
+          // 드롭다운 목록도 옵션 내용에 맞춰 넓혀 긴 부서명이 잘리지 않게
+          popupMatchSelectWidth={false}
           placeholder="부서 전체"
           value={teamFilter || undefined}
           onChange={(v) => setTeamFilter(v || '')}
@@ -520,7 +530,8 @@ export default function FleetPage() {
           showSearch optionFilterProp="label"
         />
         <Select
-          size="small" style={{ minWidth: 110 }} allowClear
+          size="small" style={{ width: fitSelectWidth(projectOptions, '프로젝트 전체') }} allowClear
+          popupMatchSelectWidth={false}
           placeholder="프로젝트 전체"
           value={projectFilter || undefined}
           onChange={(v) => setProjectFilter(v || '')}
