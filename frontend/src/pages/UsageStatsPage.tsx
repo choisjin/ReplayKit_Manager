@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Card, Col, Empty, Progress, Row, Segmented, Statistic, Table, Tooltip, Typography } from 'antd';
 import { AreaChartOutlined, DatabaseOutlined, ReloadOutlined } from '@ant-design/icons';
 import { agentApi } from '../services/api';
@@ -22,58 +22,105 @@ interface History {
   agents: AgentTotals[];
 }
 
-type RangeKey = '1d' | '7d' | '30d';
-const RANGE_OPTIONS = [
-  { label: '1일', value: '1d' },
-  { label: '7일', value: '7d' },
-  { label: '한달', value: '30d' },
+/** 휠 줌 단계 — 막대 하나가 담는 시간. 백엔드 ALL_BUCKET_STEPS 와 같은 값. */
+const ZOOMS = [
+  { sec: 600, label: '10분' },
+  { sec: 1800, label: '30분' },
+  { sec: 3600, label: '1시간' },
+  { sec: 3 * 3600, label: '3시간' },
+  { sec: 6 * 3600, label: '6시간' },
+  { sec: 12 * 3600, label: '12시간' },
+  { sec: 86400, label: '1일' },
 ];
-const RANGE_LABEL: Record<string, string> = { '1d': '최근 24시간', '7d': '최근 7일', '30d': '최근 30일' };
+const BAR_W = 12;            // 막대 폭(px)
+const CELL = BAR_W + 1;      // 막대 + 간격 1px
+const CHUNK = 16;            // 가상 스크롤 시작 인덱스 양자화 — 스크롤 중 리렌더 억제
+const BUF = 8;               // 화면 밖 여유 렌더 막대 수
+// 서버(로컬 tz)와 같은 기준으로 버킷 경계를 맞추기 위한 오프셋(초)
+const TZ_OFF = -new Date().getTimezoneOffset() * 60;
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 
-/** 버킷 크기에 맞춘 x축 라벨. 1시간 버킷은 "14시", 6시간은 "3일 12시", 1일은 "3/14". */
+/** 버킷 크기에 맞춘 x축 라벨. 자정은 날짜, 정시는 "14시", 분 단위는 "14:30". */
 function bucketLabel(t: number, bucketSec: number): string {
   const d = new Date(t * 1000);
-  if (bucketSec >= 86400) return `${d.getMonth() + 1}/${d.getDate()}`;
-  if (bucketSec >= 6 * 3600) return d.getHours() === 0 ? `${d.getMonth() + 1}/${d.getDate()}` : `${pad2(d.getHours())}시`;
+  if (bucketSec >= 86400 || (d.getHours() === 0 && d.getMinutes() === 0)) {
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  }
+  if (bucketSec < 3600) return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   return `${pad2(d.getHours())}시`;
 }
 
 function bucketTip(t: number, bucketSec: number): string {
   const s = new Date(t * 1000);
   const e = new Date((t + bucketSec) * 1000);
-  const day = `${s.getMonth() + 1}/${s.getDate()}`;
-  if (bucketSec >= 86400) return `${day} (하루)`;
-  return `${day} ${pad2(s.getHours())}:00 ~ ${pad2(e.getHours())}:00`;
+  const day = (d: Date) => `${d.getMonth() + 1}/${d.getDate()}`;
+  if (bucketSec > 86400) return `${day(s)} ~ ${day(e)}`;
+  if (bucketSec === 86400) return `${day(s)} (하루)`;
+  const hm = (d: Date) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return `${day(s)} ${hm(s)} ~ ${hm(e)}`;
 }
 
-/** 라벨이 겹치지 않도록 대략 12개만 남기고 솎아낸다. */
-function thinLabels(n: number): number {
-  return Math.max(1, Math.ceil(n / 12));
+/** 라벨 간격(버킷 수) — 라벨끼리 최소 ~72px 은 떨어지도록. 정각/자정 등
+ *  '깔끔한' 시각에 라벨이 붙게 시간 기준으로 거른다. */
+function labelStep(): number {
+  const need = Math.ceil(72 / CELL);
+  return [1, 2, 3, 4, 6, 8, 12, 24, 48].find(s => s >= need) ?? 48;
 }
 
 function sum(c: Counts, keys: StateKey[] = STATE_ORDER): number {
   return keys.reduce((s, k) => s + (c[k] || 0), 0);
 }
 
+/** 서버가 준 세밀한 버킷을 목표 스케일로 재집계. counts/ticks 는 단순 합산이 정확 —
+ *  버킷들이 시간을 빈틈없이 분할하므로 tick(=DISTINCT ts) 수도 그대로 더해진다. */
+function rebucket(buckets: RawBucket[], baseSec: number, targetSec: number): RawBucket[] {
+  if (targetSec <= baseSec) return buckets;
+  const floorT = (t: number) => Math.floor((t + TZ_OFF) / targetSec) * targetSec - TZ_OFF;
+  const out: RawBucket[] = [];
+  let cur: RawBucket | null = null;
+  for (const b of buckets) {
+    const t = floorT(b.t);
+    if (!cur || cur.t !== t) {
+      cur = { t, ticks: 0, counts: {} };
+      out.push(cur);
+    }
+    cur.ticks += b.ticks;
+    for (const k of STATE_ORDER) {
+      const v = b.counts[k];
+      if (v) cur.counts[k] = (cur.counts[k] || 0) + v;
+    }
+  }
+  return out;
+}
+
 /**
  * 사용량 통계 — 테스트 PC 들이 시간대별로 어떤 상태였는지 그래프로 본다.
  * 원본은 매니저가 60초마다 찍는 상태 샘플(agent_state_samples)이라,
  * **매니저를 켜 둔 시점부터** 데이터가 쌓인다(과거 소급 없음).
+ *
+ * 그래프는 전체 이력을 한 번에 받아 두고, 휠로 스케일(막대당 시간)을 바꾸고
+ * 가로 스크롤로 기간을 오간다. 막대가 수천 개가 될 수 있어 화면에 보이는
+ * 구간만 렌더한다(가상 스크롤 — 앞뒤는 폭만 유지하는 스페이서).
  */
 export default function UsageStatsPage() {
-  const [range, setRange] = useState<RangeKey>('1d');
+  const [zoomSec, setZoomSec] = useState(3600);
   const [mode, setMode] = useState<'avg' | 'pct'>('avg');
   const [data, setData] = useState<History | null>(null);
   const [loading, setLoading] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  const [view, setView] = useState({ start: 0, count: 160 });
   const timer = useRef<number | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // 줌 직후 스크롤 위치 복원용 — 커서(또는 화면 중앙) 아래 시각을 고정한다.
+  const anchorRef = useRef<{ time: number; vx: number } | null>(null);
+  // 오른쪽 끝(최신)에 붙어 있으면 새 데이터가 와도 계속 최신을 따라간다.
+  const stickRightRef = useRef(true);
 
-  const load = async (r: RangeKey) => {
+  const load = async () => {
     setLoading(true);
     try {
-      const res = await agentApi.stateHistory(r);
+      const res = await agentApi.stateHistory('all');
       setData(res.data);
     } catch {
       /* 폴링 중 일시 실패 무시 */
@@ -83,23 +130,112 @@ export default function UsageStatsPage() {
   };
 
   useEffect(() => {
-    load(range);
+    load();
     // 1분에 한 번만 — 원본 샘플이 60초 주기라 더 자주 받아도 그림이 안 바뀐다.
-    timer.current = window.setInterval(() => load(range), 60000);
+    timer.current = window.setInterval(load, 60000);
     return () => { if (timer.current) window.clearInterval(timer.current); };
-  }, [range]);
+  }, []);
+
+  // 서버 기본 버킷보다 세밀한 줌은 불가 — 이력이 아주 길면 최소 단계가 올라간다.
+  const levels = useMemo(
+    () => ZOOMS.filter(z => z.sec >= (data?.bucket_sec ?? ZOOMS[0].sec)),
+    [data?.bucket_sec],
+  );
+  const zoom = (levels.find(z => z.sec >= zoomSec) ?? levels[levels.length - 1]).sec;
+
+  const rebucketed = useMemo(
+    () => (data ? rebucket(data.buckets, data.bucket_sec, zoom) : []),
+    [data, zoom],
+  );
 
   const timeline: Bucket[] = useMemo(() => {
-    if (!data) return [];
-    const step = thinLabels(data.buckets.length);
-    return data.buckets.map((b, i) => ({
+    const every = zoom * labelStep();
+    return rebucketed.map(b => ({
       key: String(b.t),
-      label: i % step === 0 ? bucketLabel(b.t, data.bucket_sec) : '',
-      tipTitle: bucketTip(b.t, data.bucket_sec),
+      label: (b.t + TZ_OFF) % every === 0 ? bucketLabel(b.t, zoom) : '',
+      tipTitle: bucketTip(b.t, zoom),
       ticks: b.ticks,
       counts: b.counts,
     }));
-  }, [data]);
+  }, [rebucketed, zoom]);
+
+  // avg 모드 세로축 최대 — 보이는 구간만 렌더해도 스케일은 전체 기준으로 고정.
+  const chartMax = useMemo(() => {
+    let m = 1;
+    for (const b of rebucketed) {
+      if (b.ticks > 0) m = Math.max(m, sum(b.counts) / b.ticks);
+    }
+    return m;
+  }, [rebucketed]);
+
+  const updateView = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const raw = Math.max(0, Math.floor(el.scrollLeft / CELL) - BUF);
+    const start = Math.floor(raw / CHUNK) * CHUNK;
+    const count = Math.ceil(el.clientWidth / CELL) + BUF * 2 + CHUNK;
+    setView(v => (v.start === start && v.count === count ? v : { start, count }));
+  };
+
+  const onScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    stickRightRef.current = el.scrollLeft + el.clientWidth >= el.scrollWidth - CELL * 2;
+    updateView();
+  };
+
+  // 데이터/줌이 바뀐 직후: 앵커 시각을 같은 화면 위치로 되돌리거나, 최신 끝에 붙인다.
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const a = anchorRef.current;
+    if (a) {
+      anchorRef.current = null;
+      const idx = rebucketed.findIndex(b => b.t <= a.time && a.time < b.t + zoom);
+      if (idx >= 0) el.scrollLeft = Math.max(0, idx * CELL + CELL / 2 - a.vx);
+    } else if (stickRightRef.current) {
+      el.scrollLeft = el.scrollWidth;
+    }
+    updateView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rebucketed]);
+
+  // 휠 = 줌 (Shift+휠 = 브라우저 기본 가로 스크롤). preventDefault 가 필요해서
+  // React 합성 이벤트 대신 non-passive 리스너를 직접 단다.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.shiftKey || e.deltaY === 0) return;
+      e.preventDefault();
+      const li = levels.findIndex(z => z.sec === zoom);
+      const ni = Math.min(levels.length - 1, Math.max(0, li + (e.deltaY > 0 ? 1 : -1)));
+      if (ni === li) return;
+      const vx = e.clientX - el.getBoundingClientRect().left;
+      const idx = Math.min(rebucketed.length - 1, Math.max(0, Math.floor((el.scrollLeft + vx) / CELL)));
+      const b = rebucketed[idx];
+      if (b) anchorRef.current = { time: b.t + zoom / 2, vx };
+      setZoomSec(levels[ni].sec);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [levels, zoom, rebucketed]);
+
+  useEffect(() => {
+    window.addEventListener('resize', updateView);
+    return () => window.removeEventListener('resize', updateView);
+  }, []);
+
+  /** 줌 버튼 선택 — 화면 중앙 시각을 앵커로 잡고 스케일만 바꾼다. */
+  const onZoomSelect = (sec: number) => {
+    const el = scrollRef.current;
+    if (el && rebucketed.length) {
+      const vx = el.clientWidth / 2;
+      const idx = Math.min(rebucketed.length - 1, Math.max(0, Math.floor((el.scrollLeft + vx) / CELL)));
+      anchorRef.current = { time: rebucketed[idx].t + zoom / 2, vx };
+    }
+    setZoomSec(sec);
+  };
 
   const hourly: Bucket[] = useMemo(() => {
     if (!data) return [];
@@ -181,11 +317,22 @@ export default function UsageStatsPage() {
 
   const noData = !!data && ticks === 0;
 
+  // 가상 스크롤 — 보이는 구간만 잘라 렌더, 앞뒤는 스페이서로 폭만 유지.
+  const sliceStart = Math.min(view.start, Math.max(0, timeline.length - 1));
+  const slice = timeline.slice(sliceStart, sliceStart + view.count);
+  const padLeft = sliceStart * CELL;
+  const padRight = Math.max(0, (timeline.length - sliceStart - slice.length) * CELL);
+
+  const fmtDay = (ts: number) => {
+    const d = new Date(ts * 1000);
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+
   return (
     <div>
       <Typography.Title level={4} style={{ marginTop: 0 }}>
         <AreaChartOutlined /> 사용량 통계
-        <Button size="small" icon={<ReloadOutlined />} onClick={() => load(range)} loading={loading} style={{ marginLeft: 12 }}>
+        <Button size="small" icon={<ReloadOutlined />} onClick={load} loading={loading} style={{ marginLeft: 12 }}>
           새로고침
         </Button>
         <Button size="small" icon={<DatabaseOutlined />} onClick={() => setManageOpen(true)} style={{ marginLeft: 8 }}>
@@ -193,19 +340,26 @@ export default function UsageStatsPage() {
         </Button>
       </Typography.Title>
       <Typography.Paragraph type="secondary">
-        관제 서버가 {data?.sample_interval_sec ?? 60}초마다 기록한 전 PC 의 상태를 시간대별로 집계합니다.
-        기록은 <b>매니저가 켜져 있는 동안만</b> 쌓이고, <b>자동 삭제 없이 무기한 보관</b>됩니다
+        관제 서버가 {data?.sample_interval_sec ?? 60}초마다 기록한 전 PC 의 상태를 <b>전체 기간</b>에 대해 집계합니다.
+        그래프 위에서 <b>마우스 휠 = 확대/축소</b>, <b>Shift+휠 또는 스크롤바 = 기간 이동</b>입니다.
+        기록은 매니저가 켜져 있는 동안만 쌓이고, 자동 삭제 없이 무기한 보관됩니다
         (정리는 <b>이력 관리</b>에서 직접). 막대에 마우스를 올리면 상세가 보입니다.
       </Typography.Paragraph>
 
       <HistoryManageModal
         open={manageOpen}
         onClose={() => setManageOpen(false)}
-        onChanged={() => load(range)}
+        onChanged={load}
       />
 
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-        <Segmented value={range} onChange={(v) => setRange(v as RangeKey)} options={RANGE_OPTIONS} />
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16, alignItems: 'center' }}>
+        <Tooltip title="막대 하나가 담는 시간 — 그래프 위에서 휠로도 바뀝니다">
+          <Segmented
+            value={zoom}
+            onChange={(v) => onZoomSelect(v as number)}
+            options={levels.map(z => ({ label: z.label, value: z.sec }))}
+          />
+        </Tooltip>
         <Tooltip title="대수 = 평균 동시 PC 수 · 비율 = 상태 구성비(막대 높이 고정)">
           <Segmented
             value={mode}
@@ -247,10 +401,26 @@ export default function UsageStatsPage() {
       </Row>
 
       <Card size="small" style={{ marginBottom: 16 }}
-        title={<span style={{ fontSize: 13 }}>{RANGE_LABEL[range]} 상태 추이</span>}
+        title={
+          <span style={{ fontSize: 13 }}>
+            상태 추이{data ? ` (${fmtDay(data.since)} ~ ${fmtDay(data.now)} 전체)` : ''}
+          </span>
+        }
         extra={<StateLegend />}
       >
-        {timeline.length === 0 ? <Empty description="데이터 없음" /> : <StackedBars data={timeline} mode={mode} />}
+        {timeline.length === 0 ? <Empty description="데이터 없음" /> : (
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            style={{ overflowX: 'auto', overflowY: 'hidden', paddingBottom: 4 }}
+          >
+            <StackedBars
+              data={slice} mode={mode}
+              barWidth={BAR_W} padLeft={padLeft} padRight={padRight}
+              max={mode === 'avg' ? chartMax : undefined}
+            />
+          </div>
+        )}
       </Card>
 
       <Card size="small" style={{ marginBottom: 16 }}

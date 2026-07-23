@@ -19,6 +19,16 @@ interface Props {
   /** avg = 평균 PC 대수(막대 높이가 절대량), pct = 비율(막대 높이 100% 고정) */
   mode: 'avg' | 'pct';
   height?: number;
+  /** 지정 시: 막대가 고정폭이 되어 부모의 가로 스크롤 컨테이너 안에서 흐른다.
+   *  미지정: 기존처럼 flex 균등폭(한 화면에 모두 맞춤). */
+  barWidth?: number;
+  /** 가상 스크롤용 — 렌더에서 잘라낸 앞/뒤 구간을 픽셀 폭으로 채워
+   *  전체 콘텐츠 폭(= 전체 버킷 수 × 막대폭)을 유지한다. */
+  padLeft?: number;
+  padRight?: number;
+  /** avg 모드 세로축 최대값 override — 가상 스크롤로 일부만 렌더할 때
+   *  전체 데이터 기준 스케일을 고정하기 위해 부모가 계산해 넘긴다. */
+  max?: number;
 }
 
 function fmt(n: number): string {
@@ -30,15 +40,27 @@ function fmt(n: number): string {
  * 차트 라이브러리를 추가하면 번들이 수백 KB 늘어나는데, 여기서 필요한 건
  * '상태별 스택 막대 + hover' 뿐이라 직접 그린다. 색은 STATE 표를 그대로 쓴다.
  */
-export default function StackedBars({ data, mode, height = 170 }: Props) {
+export default function StackedBars({ data, mode, height = 170, barWidth, padLeft = 0, padRight = 0, max: maxProp }: Props) {
   // 막대 높이의 기준 — 평균 대수 모드에선 전체 최대값에 맞춘다.
   const avgOf = (b: Bucket, k: StateKey) => (b.ticks > 0 ? (b.counts[k] || 0) / b.ticks : 0);
   const totalOf = (b: Bucket) => STATE_ORDER.reduce((s, k) => s + avgOf(b, k), 0);
-  const max = Math.max(1, ...data.map(totalOf));
+  const max = maxProp ?? Math.max(1, ...data.map(totalOf));
+
+  const fixed = barWidth != null;
+  // 고정폭 모드는 gap 대신 셀 내부 paddingRight 로 1px 간격을 만든다 —
+  // 스페이서(padLeft/padRight) 폭 계산이 '셀 수 × 셀 폭'으로 딱 떨어지게.
+  const cellStyle = fixed
+    ? { width: barWidth! + 1, flex: '0 0 auto' as const, paddingRight: 1, boxSizing: 'border-box' as const }
+    : { flex: 1, minWidth: 0 };
+  const rowStyle = fixed
+    ? { gap: 0, width: 'max-content' as const }
+    : { gap: 1 };
+
+  const spacer = (w: number) => (w > 0 ? <div style={{ width: w, flex: '0 0 auto' }} /> : null);
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'stretch', height, gap: 1, position: 'relative' }}>
+      <div style={{ display: 'flex', alignItems: 'stretch', height, position: 'relative', ...rowStyle }}>
         {/* 기준선(최대/절반) — 눈금 대신 옅은 가로선만 */}
         {[0, 0.5, 1].map(f => (
           <div key={f} style={{
@@ -46,6 +68,7 @@ export default function StackedBars({ data, mode, height = 170 }: Props) {
             borderTop: '1px dashed rgba(140,140,140,0.25)', pointerEvents: 'none',
           }} />
         ))}
+        {spacer(padLeft)}
         {data.map(b => {
           const total = totalOf(b);
           const barPct = b.ticks === 0 ? 0 : (mode === 'pct' ? 100 : (total / max) * 100);
@@ -75,7 +98,7 @@ export default function StackedBars({ data, mode, height = 170 }: Props) {
               }
             >
               <div style={{
-                flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column',
+                ...cellStyle, display: 'flex', flexDirection: 'column',
                 justifyContent: 'flex-end', cursor: 'default',
               }}>
                 {b.ticks === 0 ? (
@@ -99,22 +122,26 @@ export default function StackedBars({ data, mode, height = 170 }: Props) {
             </Tooltip>
           );
         })}
+        {spacer(padRight)}
       </div>
 
       {/* x축 라벨 — 막대와 같은 flex 격자라 위치가 어긋나지 않는다 */}
-      <div style={{ display: 'flex', gap: 1, marginTop: 4 }}>
+      <div style={{ display: 'flex', marginTop: 4, ...rowStyle }}>
+        {spacer(padLeft)}
         {data.map(b => (
           <div key={b.key} style={{
-            flex: 1, minWidth: 0, fontSize: 10, opacity: 0.65,
+            ...cellStyle, fontSize: 10, opacity: 0.65,
             textAlign: 'center', whiteSpace: 'nowrap', overflow: 'visible',
           }}>
             {b.label}
           </div>
         ))}
+        {spacer(padRight)}
       </div>
 
       {mode === 'avg' && (
-        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+        // 고정폭(스크롤) 모드에선 sticky 로 왼쪽에 고정 — 스크롤해도 축 설명이 보인다.
+        <Typography.Text type="secondary" style={{ fontSize: 11, position: 'sticky', left: 0, display: 'inline-block' }}>
           세로축: 평균 PC 대수 (최대 {fmt(max)}대)
         </Typography.Text>
       )}

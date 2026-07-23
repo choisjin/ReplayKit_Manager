@@ -444,6 +444,16 @@ async def delete_state_samples(*, client_id: str | None = None,
     return await asyncio.to_thread(_run)
 
 
+async def state_sample_min_ts() -> int | None:
+    """가장 오래된 상태 샘플 시각 — '전체 이력' 그래프의 시작점."""
+    def _run():
+        conn = get_conn()
+        row = conn.execute("SELECT MIN(ts) AS m FROM agent_state_samples").fetchone()
+        conn.close()
+        return row["m"]
+    return await asyncio.to_thread(_run)
+
+
 async def query_state_history(since_ts: int, bucket_sec: int) -> dict:
     """since_ts 이후 상태 샘플을 세 가지로 집계한다.
 

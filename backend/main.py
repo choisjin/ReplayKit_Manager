@@ -601,6 +601,13 @@ HISTORY_RANGES: dict[str, tuple[int, int]] = {
     "30d": (30 * 86400, 86400),      # 최근 30일  — 1일 버킷
 }
 
+# range=all — 전체 이력을 최대한 세밀한 버킷으로 내려주고, 프론트가 휠 줌으로
+# 원하는 스케일(10분~1일)로 **재집계**한다. counts/ticks 는 합산 가능해서
+# 클라이언트 재집계가 정확하다(버킷이 시간을 빈틈없이 분할하므로).
+ALL_BUCKET_STEPS = [600, 1800, 3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400]
+# 응답 버킷 수 상한 — 600초 버킷이면 약 55일치. 넘으면 자동으로 굵은 버킷을 쓴다.
+MAX_HISTORY_BUCKETS = 8000
+
 
 async def _state_sampler():
     """SAMPLE_INTERVAL_SEC 마다 전 PC 상태를 DB 에 1 tick 기록하는 백그라운드 루프."""
@@ -626,11 +633,21 @@ async def api_agent_state_history(range_: str = Query("1d", alias="range")):
     ⚠️ 이 라우트는 반드시 /api/agents/{client_id} **앞**에 선언돼야 한다.
        뒤에 두면 "state-history" 가 client_id 로 잡혀 404 가 난다.
     """
-    if range_ not in HISTORY_RANGES:
-        range_ = "1d"
-    span, bucket_sec = HISTORY_RANGES[range_]
     now = int(time.time())
-    since = now - span
+    if range_ == "all":
+        # 전체 이력 — 첫 샘플부터. 데이터가 없으면 최근 하루 격자만(빈 그래프).
+        oldest = await db.state_sample_min_ts()
+        since = oldest if oldest is not None else now - 86400
+        span = max(now - since, 3600)
+        bucket_sec = next(
+            (b for b in ALL_BUCKET_STEPS if span // b <= MAX_HISTORY_BUCKETS),
+            ALL_BUCKET_STEPS[-1],
+        )
+    else:
+        if range_ not in HISTORY_RANGES:
+            range_ = "1d"
+        span, bucket_sec = HISTORY_RANGES[range_]
+        since = now - span
 
     agg = await db.query_state_history(since, bucket_sec)
     off = agg["tz_offset_sec"]
