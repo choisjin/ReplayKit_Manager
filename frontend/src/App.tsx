@@ -1,8 +1,7 @@
 import { useState } from 'react';
 import { App as AntdApp, Button, ConfigProvider, Layout, Menu, message, Modal, theme } from 'antd';
-import { BulbOutlined, BulbFilled, BugOutlined, LogoutOutlined, NotificationOutlined, MessageOutlined, SettingOutlined, SyncOutlined, DesktopOutlined, BarChartOutlined, AreaChartOutlined } from '@ant-design/icons';
+import { BulbOutlined, BulbFilled, BugOutlined, LogoutOutlined, NotificationOutlined, SettingOutlined, SyncOutlined, DesktopOutlined, BarChartOutlined, AreaChartOutlined } from '@ant-design/icons';
 import AnnouncementsPage from './pages/AnnouncementsPage';
-import ChatPage from './pages/ChatPage';
 import LoginPage from './pages/LoginPage';
 import PublicViewPage from './pages/PublicViewPage';
 import FleetPage from './pages/FleetPage';
@@ -87,7 +86,6 @@ function AppContent() {
     usageStats: <UsageStatsPage />,
     functionStats: <FunctionStatsPage />,
     announcements: <AnnouncementsPage />,
-    chat: <ChatPage />,
     bugReports: <BugReportsPage />,
     settings: <SettingsPage />,
   };
@@ -110,7 +108,6 @@ function AppContent() {
                 { key: 'usageStats', icon: <AreaChartOutlined />, label: '사용량 통계' },
                 { key: 'functionStats', icon: <BarChartOutlined />, label: '함수 사용통계' },
                 { key: 'announcements', icon: <NotificationOutlined />, label: '공지사항 관리' },
-                { key: 'chat', icon: <MessageOutlined />, label: '채팅 문의 관리' },
                 { key: 'bugReports', icon: <BugOutlined />, label: '버그 리포트' },
                 { key: 'settings', icon: <SettingOutlined />, label: '설정' },
               ]}

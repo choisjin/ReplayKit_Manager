@@ -1,4 +1,4 @@
-"""Admin Server — 공지사항 관리 + 채팅 허브."""
+"""Admin Server — 공지사항 관리 + 테스트 PC 관제."""
 
 from __future__ import annotations
 
@@ -305,226 +305,6 @@ async def delete_announcement(ann_id: int):
     await _broadcast_announcement_update()
     return {"status": "ok"}
 
-# ==================== 채팅 API ====================
-
-@app.get("/api/chat/rooms")
-async def get_chat_rooms():
-    return await db.list_chat_rooms()
-
-@app.get("/api/chat/rooms/{room_id}/messages")
-async def get_room_messages(room_id: str):
-    return await db.get_messages(room_id)
-
-@app.delete("/api/chat/rooms/{room_id}")
-async def delete_room(room_id: str):
-    # 연결된 유저에게 종료 알림
-    if room_id in user_connections:
-        ws = user_connections[room_id]
-        try:
-            await ws.send_json({"type": "closed", "message": "채팅이 삭제되었습니다."})
-        except Exception:
-            pass
-    ok = await db.delete_chat_room(room_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="채팅방을 찾을 수 없습니다")
-    await _notify_admins_room_update()
-    return {"status": "ok"}
-
-@app.post("/api/chat/rooms/{room_id}/close")
-async def close_room(room_id: str):
-    await db.close_chat_room(room_id)
-    # 해당 방의 유저에게 종료 알림
-    if room_id in user_connections:
-        ws = user_connections[room_id]
-        try:
-            await ws.send_json({"type": "closed", "message": "관리자가 채팅을 종료했습니다."})
-        except Exception:
-            pass
-    await _notify_admins_room_update()
-    return {"status": "ok"}
-
-# ==================== WebSocket 채팅 허브 ====================
-
-# 유저 연결: room_id -> WebSocket
-user_connections: dict[str, WebSocket] = {}
-# 관리자 연결: set of WebSocket
-admin_connections: set[WebSocket] = set()
-# 관리자가 현재 보고 있는 방: WebSocket -> room_id
-admin_active_room: dict[WebSocket, str] = {}
-
-
-async def _broadcast_announcement_update():
-    """공지사항 변경 시 연결된 모든 유저 클라이언트에 알림."""
-    announcements = await db.list_announcements(active_only=True)
-    msg = json.dumps({"type": "announcements_updated", "announcements": announcements})
-    # 유저 연결에 전송
-    for ws in list(user_connections.values()):
-        try:
-            await ws.send_text(msg)
-        except Exception:
-            pass
-
-
-async def _notify_admins_room_update():
-    """관리자들에게 채팅방 목록 갱신 알림."""
-    rooms = await db.list_chat_rooms()
-    msg = json.dumps({"type": "room_list", "rooms": rooms})
-    for ws in list(admin_connections):
-        try:
-            await ws.send_text(msg)
-        except Exception:
-            admin_connections.discard(ws)
-
-
-async def _notify_admins_message(room_id: str, message: dict):
-    """관리자들에게 새 메시지 알림."""
-    msg = json.dumps({"type": "new_message", "room_id": room_id, "message": message})
-    for ws in list(admin_connections):
-        try:
-            await ws.send_text(msg)
-        except Exception:
-            admin_connections.discard(ws)
-
-
-@app.websocket("/ws/chat")
-async def ws_chat_user(ws: WebSocket):
-    """유저 채팅 WebSocket.
-
-    프로토콜:
-    1. 유저 → {type: "join", name: "이름", department: "부서"}
-    2. 서버 → {type: "joined", room_id: "..."}
-    3. 유저 ↔ 서버: {type: "message", content: "..."}
-    """
-    await ws.accept()
-    room_id = None
-    try:
-        # 첫 메시지: join
-        raw = await ws.receive_text()
-        data = json.loads(raw)
-        if data.get("type") != "join" or not data.get("name") or not data.get("department"):
-            await ws.send_json({"type": "error", "message": "이름과 부서를 입력해주세요."})
-            await ws.close()
-            return
-
-        room_id = str(uuid.uuid4())[:8]
-        room = await db.create_chat_room(room_id, data["name"], data["department"])
-        user_connections[room_id] = ws
-
-        await ws.send_json({"type": "joined", "room_id": room_id})
-        logger.info("Chat room created: %s (%s / %s)", room_id, data["name"], data["department"])
-
-        # 관리자에게 새 방 알림
-        await _notify_admins_room_update()
-
-        # 메시지 루프
-        while True:
-            raw = await ws.receive_text()
-            msg_data = json.loads(raw)
-
-            if msg_data.get("type") == "message" and msg_data.get("content"):
-                saved = await db.add_message(room_id, "user", msg_data["content"])
-                await _notify_admins_message(room_id, {**saved, "user_name": data["name"]})
-                # 읽은 admin이 있으면 unread 리셋하지 않음
-            elif msg_data.get("type") == "typing":
-                # 타이핑 알림 → 해당 방을 보고있는 관리자에게
-                for admin_ws, active_room in admin_active_room.items():
-                    if active_room == room_id:
-                        try:
-                            await admin_ws.send_json({"type": "user_typing", "room_id": room_id})
-                        except Exception:
-                            pass
-
-    except WebSocketDisconnect:
-        logger.info("User disconnected from room %s", room_id)
-    except Exception as e:
-        logger.error("User WS error: %s", e)
-    finally:
-        if room_id:
-            user_connections.pop(room_id, None)
-            # 관리자에게 연결 해제 알림
-            for admin_ws in list(admin_connections):
-                try:
-                    await admin_ws.send_json({"type": "user_disconnected", "room_id": room_id})
-                except Exception:
-                    pass
-
-
-@app.websocket("/ws/admin/chat")
-async def ws_chat_admin(ws: WebSocket):
-    """관리자 채팅 WebSocket.
-
-    프로토콜:
-    - 서버 → {type: "room_list", rooms: [...]}
-    - 서버 → {type: "new_message", room_id, message}
-    - 관리자 → {type: "join_room", room_id} (방 선택)
-    - 관리자 → {type: "message", room_id, content}
-    - 관리자 → {type: "typing", room_id}
-    """
-    await ws.accept()
-    admin_connections.add(ws)
-    logger.info("Admin connected to chat hub")
-
-    try:
-        # 초기 방 목록 전송
-        rooms = await db.list_chat_rooms()
-        await ws.send_json({"type": "room_list", "rooms": rooms})
-
-        while True:
-            raw = await ws.receive_text()
-            data = json.loads(raw)
-
-            if data.get("type") == "join_room":
-                room_id = data.get("room_id", "")
-                admin_active_room[ws] = room_id
-                # unread 리셋
-                await db.update_room_unread(room_id, 0)
-                # 메시지 히스토리 전송
-                messages = await db.get_messages(room_id)
-                await ws.send_json({"type": "room_messages", "room_id": room_id, "messages": messages})
-                # 방 목록 갱신 (unread 변경 반영)
-                await _notify_admins_room_update()
-
-            elif data.get("type") == "message":
-                room_id = data.get("room_id", "")
-                content = data.get("content", "")
-                if room_id and content:
-                    saved = await db.add_message(room_id, "admin", content)
-                    # 유저에게 전달
-                    if room_id in user_connections:
-                        try:
-                            await user_connections[room_id].send_json({
-                                "type": "message",
-                                "from": "admin",
-                                "content": content,
-                                "created_at": saved["created_at"],
-                            })
-                        except Exception:
-                            pass
-                    # 다른 관리자에게도 전달
-                    for other_ws in admin_connections:
-                        if other_ws != ws:
-                            try:
-                                await other_ws.send_json({"type": "new_message", "room_id": room_id, "message": saved})
-                            except Exception:
-                                pass
-
-            elif data.get("type") == "typing":
-                room_id = data.get("room_id", "")
-                if room_id and room_id in user_connections:
-                    try:
-                        await user_connections[room_id].send_json({"type": "admin_typing"})
-                    except Exception:
-                        pass
-
-    except WebSocketDisconnect:
-        logger.info("Admin disconnected from chat hub")
-    except Exception as e:
-        logger.error("Admin WS error: %s", e)
-    finally:
-        admin_connections.discard(ws)
-        admin_active_room.pop(ws, None)
-
-
 # ==================== 공지사항 실시간 스트림 (유저용) ====================
 
 announcement_subscribers: set[WebSocket] = set()
@@ -547,8 +327,7 @@ async def ws_announcements(ws: WebSocket):
         announcement_subscribers.discard(ws)
 
 
-# 공지사항 브로드캐스트 (announcement_subscribers에도 전송)
-_original_broadcast = _broadcast_announcement_update
+# 공지사항 브로드캐스트 — 구독 중인 유저 클라이언트(/ws/announcements)에 전송
 async def _broadcast_announcement_update():
     announcements = await db.list_announcements(active_only=True)
     msg = json.dumps({"type": "announcements", "announcements": announcements})
@@ -557,12 +336,6 @@ async def _broadcast_announcement_update():
             await ws.send_text(msg)
         except Exception:
             announcement_subscribers.discard(ws)
-    # 채팅 유저 연결에도 전송
-    for ws in list(user_connections.values()):
-        try:
-            await ws.send_text(msg)
-        except Exception:
-            pass
 
 
 # ==================== 테스트 PC 관제 (에이전트) ====================

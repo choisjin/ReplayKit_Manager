@@ -1,4 +1,4 @@
-"""Admin SQLite Database — 공지사항 + 채팅."""
+"""Admin SQLite Database — 공지사항 + 관제 스냅샷 + 버그 리포트."""
 
 import sqlite3
 import asyncio
@@ -29,25 +29,6 @@ def init_db():
             active INTEGER DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS chat_rooms (
-            id TEXT PRIMARY KEY,
-            user_name TEXT NOT NULL,
-            department TEXT NOT NULL,
-            status TEXT DEFAULT 'active',
-            unread_count INTEGER DEFAULT 0,
-            created_at TEXT NOT NULL,
-            closed_at TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS chat_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            room_id TEXT NOT NULL,
-            sender TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (room_id) REFERENCES chat_rooms(id)
         );
 
         -- 테스트 PC(에이전트)별 모듈/함수 사용통계 스냅샷.
@@ -253,92 +234,6 @@ async def delete_announcement(ann_id: int) -> bool:
         conn.commit()
         conn.close()
         return cur.rowcount > 0
-    return await asyncio.to_thread(_run)
-
-# --- 채팅방 ---
-
-async def create_chat_room(room_id: str, user_name: str, department: str) -> dict:
-    def _run():
-        conn = get_conn()
-        now = _now()
-        conn.execute(
-            "INSERT INTO chat_rooms (id, user_name, department, status, unread_count, created_at) VALUES (?, ?, ?, 'active', 1, ?)",
-            (room_id, user_name, department, now),
-        )
-        conn.commit()
-        row = conn.execute("SELECT * FROM chat_rooms WHERE id=?", (room_id,)).fetchone()
-        conn.close()
-        return dict(row)
-    return await asyncio.to_thread(_run)
-
-async def list_chat_rooms() -> list[dict]:
-    def _run():
-        conn = get_conn()
-        rows = conn.execute("""
-            SELECT r.*,
-                   (SELECT content FROM chat_messages WHERE room_id=r.id ORDER BY created_at DESC LIMIT 1) as last_message,
-                   (SELECT created_at FROM chat_messages WHERE room_id=r.id ORDER BY created_at DESC LIMIT 1) as last_message_at
-            FROM chat_rooms r ORDER BY r.status='active' DESC, COALESCE(last_message_at, r.created_at) DESC
-        """).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    return await asyncio.to_thread(_run)
-
-async def close_chat_room(room_id: str):
-    def _run():
-        conn = get_conn()
-        conn.execute("UPDATE chat_rooms SET status='closed', closed_at=? WHERE id=?", (_now(), room_id))
-        conn.commit()
-        conn.close()
-    await asyncio.to_thread(_run)
-
-async def delete_chat_room(room_id: str) -> bool:
-    def _run():
-        conn = get_conn()
-        conn.execute("DELETE FROM chat_messages WHERE room_id=?", (room_id,))
-        cur = conn.execute("DELETE FROM chat_rooms WHERE id=?", (room_id,))
-        conn.commit()
-        conn.close()
-        return cur.rowcount > 0
-    return await asyncio.to_thread(_run)
-
-async def update_room_unread(room_id: str, count: int):
-    def _run():
-        conn = get_conn()
-        conn.execute("UPDATE chat_rooms SET unread_count=? WHERE id=?", (count, room_id))
-        conn.commit()
-        conn.close()
-    await asyncio.to_thread(_run)
-
-# --- 메시지 ---
-
-async def add_message(room_id: str, sender: str, content: str) -> dict:
-    def _run():
-        conn = get_conn()
-        now = _now()
-        cur = conn.execute(
-            "INSERT INTO chat_messages (room_id, sender, content, created_at) VALUES (?, ?, ?, ?)",
-            (room_id, sender, content, now),
-        )
-        conn.commit()
-        row = conn.execute("SELECT * FROM chat_messages WHERE id=?", (cur.lastrowid,)).fetchone()
-        # 유저 메시지면 unread 증가
-        if sender == "user":
-            conn.execute("UPDATE chat_rooms SET unread_count = unread_count + 1 WHERE id=?", (room_id,))
-            conn.commit()
-        conn.close()
-        return dict(row)
-    return await asyncio.to_thread(_run)
-
-async def get_messages(room_id: str, limit: int = 200) -> list[dict]:
-    def _run():
-        conn = get_conn()
-        rows = conn.execute(
-            "SELECT * FROM chat_messages WHERE room_id=? ORDER BY created_at ASC LIMIT ?",
-            (room_id, limit),
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
     return await asyncio.to_thread(_run)
 
 # --- 에이전트(테스트 PC) 함수통계 스냅샷 ---

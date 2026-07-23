@@ -63,10 +63,3 @@ export const bugReportApi = {
   fileUrl: (id: number, path: string, maxBytes?: number) =>
     `/api/bug-reports/${id}/file?path=${encodeURIComponent(path)}${maxBytes ? `&max_bytes=${maxBytes}` : ''}`,
 };
-
-export const chatApi = {
-  rooms: () => api.get('/chat/rooms'),
-  messages: (roomId: string) => api.get(`/chat/rooms/${roomId}/messages`),
-  closeRoom: (roomId: string) => api.post(`/chat/rooms/${roomId}/close`),
-  deleteRoom: (roomId: string) => api.delete(`/chat/rooms/${roomId}`),
-};
