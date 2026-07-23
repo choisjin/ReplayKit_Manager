@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Badge, Button, Card, Col, Empty, Modal, Progress, Row, Segmented, Statistic, Tag, Tooltip, Typography, message } from 'antd';
-import { DeleteOutlined, DesktopOutlined, PlayCircleOutlined, VideoCameraOutlined } from '@ant-design/icons';
+import { Badge, Button, Card, Col, Empty, Modal, Progress, Row, Segmented, Select, Statistic, Tag, Tooltip, Typography, message } from 'antd';
+import { DeleteOutlined, DesktopOutlined, PlayCircleOutlined, UserOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import { agentApi } from '../services/api';
 import { STATE, StateKey, stateOf, tint } from '../lib/agentState';
 import { StateLegend } from '../components/StackedBars';
@@ -49,6 +49,15 @@ interface Playback {
   error: number;
   error_message?: string;
 }
+// 로그인(사용자 식별) — ReplayKit 에서 선택한 사용자. null = 미로그인.
+interface AgentUser {
+  user_id: string;
+  name: string;
+  title: string;
+  team: string;      // 부서/팀
+  project: string;   // 카탈로그 프로젝트 (HKMC / VW 등)
+  model?: string;    // 카탈로그 모델 (선택)
+}
 interface Agent {
   client_id: string;
   name: string;
@@ -64,6 +73,7 @@ interface Agent {
   playback: Playback | null;
   scenario_count: number;
   ui?: UiState;
+  user?: AgentUser | null;
 }
 interface Summary { total: number; online: number; playing: number; recording: number; }
 
@@ -72,16 +82,23 @@ interface Summary { total: number; online: number; playing: number; recording: n
 // ── 정렬 ──
 // 기본값은 **연결 순서 고정**(default) — 2초마다 폴링하므로 상태순으로 두면 카드가 계속
 // 자리를 옮겨 눈으로 따라가기 어렵다. 필요할 때만 상태순으로 바꿔 쓰도록 선택지로 둔다.
-type SortKey = 'default' | 'state' | 'name';
+type SortKey = 'default' | 'state' | 'name' | 'team' | 'project';
 const SORT_KEY = 'fleet_sort';
 const SORT_OPTIONS = [
   { label: '연결순', value: 'default' },
   { label: '상태순', value: 'state' },
   { label: '이름순', value: 'name' },
+  { label: '부서순', value: 'team' },
+  { label: '프로젝트순', value: 'project' },
 ];
 
 function agentName(a: Agent): string {
   return a.name || a.client_id;
+}
+
+/** 부서/프로젝트 정렬 키 — 값이 없으면(미로그인) 맨 뒤로 보낸다. */
+function groupKey(v: string | undefined): string {
+  return v ? `0${v}` : '1';
 }
 
 function sortAgents(list: Agent[], sort: SortKey): Agent[] {
@@ -89,6 +106,14 @@ function sortAgents(list: Agent[], sort: SortKey): Agent[] {
   const arr = [...list];
   if (sort === 'name') {
     arr.sort((x, y) => agentName(x).localeCompare(agentName(y)));
+  } else if (sort === 'team') {
+    arr.sort((x, y) =>
+      groupKey(x.user?.team).localeCompare(groupKey(y.user?.team)) ||
+      agentName(x).localeCompare(agentName(y)));
+  } else if (sort === 'project') {
+    arr.sort((x, y) =>
+      groupKey(x.user?.project).localeCompare(groupKey(y.user?.project)) ||
+      agentName(x).localeCompare(agentName(y)));
   } else {
     // 상태가 같으면 이름순 — 같은 상태 안에서는 순서가 흔들리지 않는다.
     arr.sort((x, y) =>
@@ -99,7 +124,8 @@ function sortAgents(list: Agent[], sort: SortKey): Agent[] {
 }
 
 // 카드 고정 높이 — 재생 여부/디바이스 수에 따라 크기가 변하지 않게 한다.
-const CARD_HEIGHT = 104;
+// (사용자/부서/프로젝트 행이 추가되며 104 → 124)
+const CARD_HEIGHT = 124;
 // 카드 안 태그는 전부 동일한 미니 사이즈 (줄바꿈으로 높이가 늘지 않도록)
 const MINI_TAG: React.CSSProperties = {
   fontSize: 10, margin: 0, padding: '0 5px', lineHeight: '17px',
@@ -143,6 +169,18 @@ function deviceTooltip(a: Agent) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function userTooltip(a: Agent) {
+  const u = a.user;
+  if (!u) return '미로그인 — ReplayKit 웹에서 사용자를 선택하지 않았습니다';
+  return (
+    <div style={{ fontSize: 11, lineHeight: 1.7 }}>
+      <div><b>{u.name}</b>{u.title ? ` ${u.title}` : ''}</div>
+      {u.team && <div>부서 {u.team}</div>}
+      {u.project && <div>프로젝트 {u.project}{u.model ? ` · ${u.model}` : ''}</div>}
     </div>
   );
 }
@@ -236,6 +274,9 @@ export default function FleetPage() {
   // 정렬 기준은 브라우저에 기억 — 관제 화면은 띄워 두고 쓰는 경우가 많다.
   const [sort, setSort] = useState<SortKey>(
     () => (localStorage.getItem(SORT_KEY) as SortKey) || 'default');
+  // 부서/프로젝트 필터 ('' = 전체) — 로그인 사용자 정보 기준
+  const [teamFilter, setTeamFilter] = useState('');
+  const [projectFilter, setProjectFilter] = useState('');
   const timer = useRef<number | null>(null);
 
   const changeSort = (v: SortKey) => {
@@ -356,7 +397,31 @@ export default function FleetPage() {
             )}
           </div>
 
-          {/* 3행 — 재생 진행 (재생 여부와 무관하게 같은 높이를 차지해 카드 크기 고정) */}
+          {/* 3행 — 사용자/부서 + 프로젝트 (미로그인도 같은 높이 유지) */}
+          <Tooltip title={userTooltip(a)}>
+            <div style={{
+              marginTop: 4, height: 17, display: 'flex', alignItems: 'center', gap: 4,
+              fontSize: 10, overflow: 'hidden', whiteSpace: 'nowrap', cursor: 'default',
+            }}>
+              {a.user ? (
+                <>
+                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <UserOutlined /> {a.user.name}
+                    {a.user.team && <span style={{ opacity: 0.65 }}> · {a.user.team}</span>}
+                  </span>
+                  {a.user.project && (
+                    <Tag color="blue" style={MINI_TAG}>
+                      {a.user.project}{a.user.model ? `·${a.user.model}` : ''}
+                    </Tag>
+                  )}
+                </>
+              ) : (
+                <span style={{ opacity: 0.45 }}><UserOutlined /> 미로그인</span>
+              )}
+            </div>
+          </Tooltip>
+
+          {/* 4행 — 재생 진행 (재생 여부와 무관하게 같은 높이를 차지해 카드 크기 고정) */}
           <Tooltip title={playbackTooltip(a)}>
             <div style={{ marginTop: 6, height: 20, display: 'flex', alignItems: 'center', gap: 6, cursor: 'default' }}>
               {pb && prog ? (
@@ -395,11 +460,24 @@ export default function FleetPage() {
     );
   };
 
-  // 2초 폴링마다 재정렬되므로 memo — agents/sort 가 바뀔 때만 계산한다.
+  // 부서/프로젝트 필터 옵션 — 현재 접속 이력이 있는 값들만
+  const teamOptions = useMemo(
+    () => Array.from(new Set(agents.map(a => a.user?.team).filter(Boolean) as string[])).sort(),
+    [agents]);
+  const projectOptions = useMemo(
+    () => Array.from(new Set(agents.map(a => a.user?.project).filter(Boolean) as string[])).sort(),
+    [agents]);
+
+  // 2초 폴링마다 재정렬되므로 memo — agents/sort/필터가 바뀔 때만 계산한다.
+  const visibleAgents = useMemo(
+    () => agents.filter(a =>
+      (!teamFilter || a.user?.team === teamFilter) &&
+      (!projectFilter || a.user?.project === projectFilter)),
+    [agents, teamFilter, projectFilter]);
   const onlineAgents = useMemo(
-    () => sortAgents(agents.filter(a => a.online), sort), [agents, sort]);
+    () => sortAgents(visibleAgents.filter(a => a.online), sort), [visibleAgents, sort]);
   const offlineAgents = useMemo(
-    () => sortAgents(agents.filter(a => !a.online), sort), [agents, sort]);
+    () => sortAgents(visibleAgents.filter(a => !a.online), sort), [visibleAgents, sort]);
   // 범례에 상태별 대수도 같이 — 색이 무슨 뜻인지 + 지금 몇 대인지 한 줄에서 읽힌다.
   const stateCount = useMemo(() => {
     const m = {} as Record<StateKey, number>;
@@ -432,7 +510,24 @@ export default function FleetPage() {
       }}>
         {/* 범례는 사용량 통계 페이지와 공용 컴포넌트 — 색 정의가 갈라지지 않게 */}
         <div style={{ flex: 1, minWidth: 0 }}><StateLegend counts={stateCount} /></div>
-        <Tooltip title="연결순 = 접속한 순서 고정(카드가 자리를 옮기지 않음) · 상태순 = 재생 중부터 위로">
+        {/* 부서/프로젝트 필터 — 로그인 사용자 정보 기준 (미로그인 PC 는 필터 시 제외) */}
+        <Select
+          size="small" style={{ minWidth: 130 }} allowClear
+          placeholder="부서 전체"
+          value={teamFilter || undefined}
+          onChange={(v) => setTeamFilter(v || '')}
+          options={teamOptions.map(t => ({ label: t, value: t }))}
+          showSearch optionFilterProp="label"
+        />
+        <Select
+          size="small" style={{ minWidth: 110 }} allowClear
+          placeholder="프로젝트 전체"
+          value={projectFilter || undefined}
+          onChange={(v) => setProjectFilter(v || '')}
+          options={projectOptions.map(p => ({ label: p, value: p }))}
+          showSearch optionFilterProp="label"
+        />
+        <Tooltip title="연결순 = 접속한 순서 고정(카드가 자리를 옮기지 않음) · 상태순 = 재생 중부터 위로 · 부서/프로젝트순 = 로그인 사용자 기준">
           <Segmented
             size="small"
             value={sort}

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, Col, Empty, Progress, Row, Segmented, Statistic, Table, Tooltip, Typography } from 'antd';
+import { Alert, Button, Card, Col, Empty, Progress, Row, Segmented, Select, Statistic, Table, Tooltip, Typography } from 'antd';
 import { AreaChartOutlined, DatabaseOutlined, ReloadOutlined } from '@ant-design/icons';
 import { agentApi } from '../services/api';
 import { ACTIVE_STATES, STATE, STATE_ORDER, StateKey } from '../lib/agentState';
@@ -9,7 +9,12 @@ import HistoryManageModal from '../components/HistoryManageModal';
 type Counts = Partial<Record<StateKey, number>>;
 interface RawBucket { t: number; ticks: number; counts: Counts }
 interface RawHour { hour: number; ticks: number; counts: Counts }
-interface AgentTotals { client_id: string; name: string; samples: number; counts: Counts }
+interface AgentTotals {
+  client_id: string; name: string; samples: number; counts: Counts;
+  // 로그인 사용자 메타 (현재 값 기준 — 과거 소급 없음)
+  user_name?: string; user_team?: string; project?: string;
+}
+interface AgentMeta { client_id: string; host: string; user_name: string; user_team: string; project: string }
 interface History {
   range: string;
   since: number;
@@ -109,6 +114,10 @@ export default function UsageStatsPage() {
   const [data, setData] = useState<History | null>(null);
   const [loading, setLoading] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  // 부서/프로젝트 필터 ('' = 전체) — 서버가 해당 PC 들만 집계해 내려준다
+  const [teamFilter, setTeamFilter] = useState('');
+  const [projectFilter, setProjectFilter] = useState('');
+  const [meta, setMeta] = useState<AgentMeta[]>([]);
   const [view, setView] = useState({ start: 0, count: 160 });
   const timer = useRef<number | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -120,7 +129,10 @@ export default function UsageStatsPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const res = await agentApi.stateHistory('all');
+      const res = await agentApi.stateHistory('all', {
+        team: teamFilter || undefined,
+        project: projectFilter || undefined,
+      });
       setData(res.data);
     } catch {
       /* 폴링 중 일시 실패 무시 */
@@ -134,7 +146,17 @@ export default function UsageStatsPage() {
     // 1분에 한 번만 — 원본 샘플이 60초 주기라 더 자주 받아도 그림이 안 바뀐다.
     timer.current = window.setInterval(load, 60000);
     return () => { if (timer.current) window.clearInterval(timer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamFilter, projectFilter]);
+
+  // 필터 옵션 원본 — 전체 PC 메타 (필터와 무관하게 항상 전체 목록에서 뽑는다)
+  useEffect(() => {
+    agentApi.meta().then(r => setMeta(r.data.agents || [])).catch(() => {});
   }, []);
+  const teamOptions = useMemo(
+    () => Array.from(new Set(meta.map(m => m.user_team).filter(Boolean))).sort(), [meta]);
+  const projectOptions = useMemo(
+    () => Array.from(new Set(meta.map(m => m.project).filter(Boolean))).sort(), [meta]);
 
   // 서버 기본 버킷보다 세밀한 줌은 불가 — 이력이 아주 길면 최소 단계가 올라간다.
   const levels = useMemo(
@@ -273,6 +295,21 @@ export default function UsageStatsPage() {
       render: (v: string, r: AgentTotals) => <Tooltip title={r.client_id}><span>{v}</span></Tooltip>,
     },
     {
+      title: '사용자', dataIndex: 'user_name', key: 'user_name', width: 90, ellipsis: true,
+      sorter: (a: AgentTotals, b: AgentTotals) => (a.user_name || '').localeCompare(b.user_name || ''),
+      render: (v: string) => v || <span style={{ opacity: 0.4 }}>-</span>,
+    },
+    {
+      title: '부서', dataIndex: 'user_team', key: 'user_team', width: 140, ellipsis: true,
+      sorter: (a: AgentTotals, b: AgentTotals) => (a.user_team || '').localeCompare(b.user_team || ''),
+      render: (v: string) => v || <span style={{ opacity: 0.4 }}>-</span>,
+    },
+    {
+      title: '프로젝트', dataIndex: 'project', key: 'project', width: 90, ellipsis: true,
+      sorter: (a: AgentTotals, b: AgentTotals) => (a.project || '').localeCompare(b.project || ''),
+      render: (v: string) => v || <span style={{ opacity: 0.4 }}>-</span>,
+    },
+    {
       title: '가동률', key: 'util', width: 130,
       defaultSortOrder: 'descend' as const,
       sorter: (a: AgentTotals, b: AgentTotals) => utilOf(a) - utilOf(b),
@@ -367,6 +404,28 @@ export default function UsageStatsPage() {
             options={[{ label: '대수', value: 'avg' }, { label: '비율', value: 'pct' }]}
           />
         </Tooltip>
+        {/* 부서/프로젝트 필터 — 해당 사용자가 로그인한 PC 들만 집계 (현재 값 기준) */}
+        <Select
+          style={{ minWidth: 140 }} allowClear
+          placeholder="부서 전체"
+          value={teamFilter || undefined}
+          onChange={(v) => setTeamFilter(v || '')}
+          options={teamOptions.map(t => ({ label: t, value: t }))}
+          showSearch optionFilterProp="label"
+        />
+        <Select
+          style={{ minWidth: 120 }} allowClear
+          placeholder="프로젝트 전체"
+          value={projectFilter || undefined}
+          onChange={(v) => setProjectFilter(v || '')}
+          options={projectOptions.map(p => ({ label: p, value: p }))}
+          showSearch optionFilterProp="label"
+        />
+        {(teamFilter || projectFilter) && (
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+            필터는 <b>현재</b> 로그인 사용자 기준입니다 (과거 소급 없음)
+          </Typography.Text>
+        )}
       </div>
 
       {noData && (

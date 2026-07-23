@@ -19,6 +19,10 @@ export interface BugReport {
   file_name: string;
   file_size: number;
   status: 'new' | 'reviewed';
+  // 로그인 사용자 정보 (구버전 리포트에는 없음)
+  user_name?: string;
+  user_team?: string;
+  project?: string;
 }
 
 interface ZipFileEntry {
@@ -222,7 +226,9 @@ export default function BugReportViewer({ report, onClose }: { report: BugReport
     children: report && (
       <div>
         <Descriptions column={2} size="small" bordered style={{ marginBottom: 12 }}>
-          <Descriptions.Item label="제보자">{report.reporter || '-'}</Descriptions.Item>
+          <Descriptions.Item label="제보자">{report.user_name || report.reporter || '-'}</Descriptions.Item>
+          <Descriptions.Item label="부서">{report.user_team || '-'}</Descriptions.Item>
+          <Descriptions.Item label="프로젝트">{report.project || '-'}</Descriptions.Item>
           <Descriptions.Item label="호스트">{report.hostname || '-'}</Descriptions.Item>
           <Descriptions.Item label="버전">{report.version || '-'}</Descriptions.Item>
           <Descriptions.Item label="플랫폼">{report.platform || '-'}</Descriptions.Item>

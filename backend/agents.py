@@ -108,6 +108,10 @@ class AgentRegistry:
         # (msg.get() 으로 덮어쓰면 매 tick None 이 되어 함수통계가 사라진다)
         if "usage_stats" in msg:
             st["usage_stats"] = msg["usage_stats"]
+        # 로그인 사용자 {user_id, name, title, team, project}. 키가 있을 때만 반영 —
+        # None(로그아웃/미로그인)도 유효한 값이므로 usage_stats 와 달리 그대로 덮어쓴다.
+        if "user" in msg:
+            st["user"] = msg.get("user") or None
 
     def mark_offline(self, client_id: str) -> None:
         st = self._agents.get(client_id)
@@ -167,6 +171,8 @@ class AgentRegistry:
             "playback": pb,
             "scenario_count": st.get("scenario_count", 0),
             "ui": ui,   # {mode, page} — 빈 값이면 브라우저 미접속
+            # 로그인 사용자(부서/프로젝트 포함). None = 미로그인.
+            "user": st.get("user") or None,
         }
 
     def get_all(self) -> list[dict]:
@@ -216,6 +222,14 @@ class AgentRegistry:
     def names(self) -> dict[str, str]:
         """client_id → 호스트명 (그래프의 PC별 표시용)."""
         return {st.get("client_id", ""): st.get("name", "") for st in self._agents.values()}
+
+    def users(self) -> dict[str, dict]:
+        """client_id → 로그인 사용자 dict (라이브 값 — DB 스냅샷보다 우선)."""
+        return {
+            st.get("client_id", ""): st["user"]
+            for st in self._agents.values()
+            if st.get("user")
+        }
 
     def summary(self) -> dict:
         views = self.get_all()

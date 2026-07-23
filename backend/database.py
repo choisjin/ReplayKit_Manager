@@ -93,6 +93,13 @@ def init_db():
             file_size INTEGER DEFAULT 0,
             status TEXT DEFAULT 'new'     -- 'new' | 'reviewed'
         );
+
+        -- 서버 설정 키-값 저장소 (Jira 계정, 프로젝트 목록 등).
+        -- ReplayKit 에이전트가 로그인(사용자 식별)에 쓸 값을 여기서 내려준다.
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
     """)
     # 마이그레이션: 기존 announcements 테이블에 신규 컬럼 추가
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(announcements)").fetchall()}
@@ -108,8 +115,57 @@ def init_db():
     for col, ddl in migrations:
         if col not in cols:
             conn.execute(ddl)
+    # 마이그레이션: agent_usage 에 로그인 사용자 정보 (관제/통계의 부서·프로젝트 필터 원본)
+    au_cols = {row["name"] for row in conn.execute("PRAGMA table_info(agent_usage)").fetchall()}
+    for col, ddl in [
+        ("user_name", "ALTER TABLE agent_usage ADD COLUMN user_name TEXT"),
+        ("user_title", "ALTER TABLE agent_usage ADD COLUMN user_title TEXT"),
+        ("user_team", "ALTER TABLE agent_usage ADD COLUMN user_team TEXT"),   # 부서/팀
+        ("project", "ALTER TABLE agent_usage ADD COLUMN project TEXT"),       # HKMC/Nissan 등
+    ]:
+        if col not in au_cols:
+            conn.execute(ddl)
+    # 마이그레이션: bug_reports 에 제출 사용자 정보 (목록 헤더의 부서·프로젝트)
+    br_cols = {row["name"] for row in conn.execute("PRAGMA table_info(bug_reports)").fetchall()}
+    for col, ddl in [
+        ("user_name", "ALTER TABLE bug_reports ADD COLUMN user_name TEXT"),
+        ("user_team", "ALTER TABLE bug_reports ADD COLUMN user_team TEXT"),
+        ("project", "ALTER TABLE bug_reports ADD COLUMN project TEXT"),
+    ]:
+        if col not in br_cols:
+            conn.execute(ddl)
     conn.commit()
     conn.close()
+
+
+# --- 서버 설정 (키-값) ---
+
+async def get_settings_map(keys: list[str] | None = None) -> dict[str, str]:
+    """설정 키-값 조회. keys 미지정 시 전체."""
+    def _run():
+        conn = get_conn()
+        if keys:
+            ph = ",".join("?" for _ in keys)
+            rows = conn.execute(f"SELECT key, value FROM settings WHERE key IN ({ph})", keys).fetchall()
+        else:
+            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+        conn.close()
+        return {r["key"]: (r["value"] or "") for r in rows}
+    return await asyncio.to_thread(_run)
+
+
+async def set_settings_map(values: dict[str, str]) -> None:
+    """설정 키-값 저장(upsert)."""
+    def _run():
+        conn = get_conn()
+        conn.executemany(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [(k, v) for k, v in values.items()],
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_run)
 
 
 def _row_to_ann(row) -> dict:
@@ -304,6 +360,51 @@ async def upsert_agent_usage(client_id: str, host: str, ip: str,
         conn.close()
     await asyncio.to_thread(_run)
 
+async def upsert_agent_user(client_id: str, host: str, ip: str, user: dict) -> None:
+    """PC별 로그인 사용자 정보 저장(upsert) — usage_json 은 건드리지 않는다.
+
+    관제 라이브 상태는 메모리에만 있으므로, 오프라인 PC 의 부서·프로젝트 필터와
+    사용량 통계의 client_id→부서/프로젝트 매핑은 이 컬럼이 원본이다.
+    """
+    def _run():
+        conn = get_conn()
+        conn.execute(
+            "INSERT INTO agent_usage (client_id, host, ip, user_name, user_title, user_team, project, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(client_id) DO UPDATE SET "
+            "host=excluded.host, ip=excluded.ip, "
+            "user_name=excluded.user_name, user_title=excluded.user_title, "
+            "user_team=excluded.user_team, project=excluded.project, "
+            "updated_at=excluded.updated_at",
+            (client_id, host, ip,
+             str(user.get("name") or ""), str(user.get("title") or ""),
+             str(user.get("team") or ""), str(user.get("project") or ""), _now()),
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_run)
+
+
+async def list_agent_meta() -> list[dict]:
+    """PC별 표시 메타(호스트명 + 로그인 사용자/부서/프로젝트) — DB 스냅샷 기준.
+
+    라이브 값은 registry 가 갖고 있으므로 호출부에서 registry 우선으로 병합한다.
+    """
+    def _run():
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT client_id, host, user_name, user_title, user_team, project FROM agent_usage"
+        ).fetchall()
+        conn.close()
+        return [
+            {"client_id": r["client_id"], "host": r["host"] or "",
+             "user_name": r["user_name"] or "", "user_title": r["user_title"] or "",
+             "user_team": r["user_team"] or "", "project": r["project"] or ""}
+            for r in rows
+        ]
+    return await asyncio.to_thread(_run)
+
+
 async def delete_agent_usage(client_id: str) -> bool:
     """에이전트의 함수통계 스냅샷을 삭제 (오래된/중복 카드 정리용)."""
     def _run():
@@ -454,7 +555,8 @@ async def state_sample_min_ts() -> int | None:
     return await asyncio.to_thread(_run)
 
 
-async def query_state_history(since_ts: int, bucket_sec: int) -> dict:
+async def query_state_history(since_ts: int, bucket_sec: int,
+                              client_ids: list[str] | None = None) -> dict:
     """since_ts 이후 상태 샘플을 세 가지로 집계한다.
 
       - by_bucket : 시간 흐름(버킷)별 상태 카운트 — 메인 시계열 그래프
@@ -464,37 +566,46 @@ async def query_state_history(since_ts: int, bucket_sec: int) -> dict:
     카운트는 **샘플 수**다. 버킷의 tick 수(= COUNT(DISTINCT ts))로 나누면
     그 구간의 '평균 PC 대수' 가 된다. 서버가 꺼져 있던 구간은 tick 이 0 이므로
     '전부 대기' 가 아니라 **데이터 없음**으로 구분할 수 있다.
+
+    client_ids 지정 시 해당 PC 들만 집계한다 (부서/프로젝트 필터).
+    tick 수도 필터된 집합 기준(선택 PC 중 하나라도 찍힌 tick)이므로
+    평균 대수 계산이 필터와 일관된다.
     """
     off = _tz_offset_sec()
 
     def _run():
         conn = get_conn()
+        where = "ts >= ?"
+        params: list = [since_ts]
+        if client_ids:
+            where += f" AND client_id IN ({','.join('?' for _ in client_ids)})"
+            params.extend(client_ids)
         # 로컬 시각 기준으로 내림한 버킷 시작(epoch 초)
         bexpr = f"(((ts + {off}) / {bucket_sec}) * {bucket_sec} - {off})"
         by_bucket = conn.execute(
             f"SELECT {bexpr} AS b, state, COUNT(*) AS n FROM agent_state_samples "
-            "WHERE ts >= ? GROUP BY b, state", (since_ts,),
+            f"WHERE {where} GROUP BY b, state", params,
         ).fetchall()
         bucket_ticks = conn.execute(
             f"SELECT {bexpr} AS b, COUNT(DISTINCT ts) AS t FROM agent_state_samples "
-            "WHERE ts >= ? GROUP BY b", (since_ts,),
+            f"WHERE {where} GROUP BY b", params,
         ).fetchall()
         hexpr = f"(((ts + {off}) / 3600) % 24)"
         by_hour = conn.execute(
             f"SELECT {hexpr} AS h, state, COUNT(*) AS n FROM agent_state_samples "
-            "WHERE ts >= ? GROUP BY h, state", (since_ts,),
+            f"WHERE {where} GROUP BY h, state", params,
         ).fetchall()
         hour_ticks = conn.execute(
             f"SELECT {hexpr} AS h, COUNT(DISTINCT ts) AS t FROM agent_state_samples "
-            "WHERE ts >= ? GROUP BY h", (since_ts,),
+            f"WHERE {where} GROUP BY h", params,
         ).fetchall()
         by_agent = conn.execute(
             "SELECT client_id, state, COUNT(*) AS n FROM agent_state_samples "
-            "WHERE ts >= ? GROUP BY client_id, state", (since_ts,),
+            f"WHERE {where} GROUP BY client_id, state", params,
         ).fetchall()
         total_ticks = conn.execute(
-            "SELECT COUNT(DISTINCT ts) AS t FROM agent_state_samples WHERE ts >= ?",
-            (since_ts,),
+            f"SELECT COUNT(DISTINCT ts) AS t FROM agent_state_samples WHERE {where}",
+            params,
         ).fetchone()["t"]
         conn.close()
         return {
@@ -522,6 +633,9 @@ async def create_bug_report(
     file_path: str = "",
     file_name: str = "",
     file_size: int = 0,
+    user_name: str = "",
+    user_team: str = "",
+    project: str = "",
 ) -> dict:
     def _run():
         conn = get_conn()
@@ -529,10 +643,12 @@ async def create_bug_report(
         cur = conn.execute(
             "INSERT INTO bug_reports "
             "(title, description, reporter, version, boot_id, platform, hostname, "
-            " client_created_at, received_at, file_path, file_name, file_size, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')",
+            " client_created_at, received_at, file_path, file_name, file_size, status, "
+            " user_name, user_team, project) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?)",
             (title, description, reporter, version, boot_id, platform, hostname,
-             client_created_at, now, file_path, file_name, file_size),
+             client_created_at, now, file_path, file_name, file_size,
+             user_name, user_team, project),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM bug_reports WHERE id=?", (cur.lastrowid,)).fetchone()

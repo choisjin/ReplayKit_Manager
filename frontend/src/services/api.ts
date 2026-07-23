@@ -18,6 +18,13 @@ export const systemApi = {
   update: () => api.post('/update'),
 };
 
+// 로그인(사용자 식별) 설정 — ReplayKit 이 유저 검색에 쓸 Jira 계정 관리
+export const loginSettingsApi = {
+  get: () => api.get('/settings/login'),
+  save: (data: { jira_server?: string; jira_id?: string; jira_pw?: string }) =>
+    api.put('/settings/login', data),
+};
+
 export const translateApi = {
   toEn: (texts: string[]) => api.post('/translate', { texts }),
 };
@@ -25,8 +32,11 @@ export const translateApi = {
 export const agentApi = {
   list: () => api.get('/agents'),
   functionStats: () => api.get('/agents/function-stats'),
-  // 사용량 통계 그래프 — range: '1d' | '7d' | '30d'
-  stateHistory: (range: string) => api.get('/agents/state-history', { params: { range } }),
+  // PC별 메타(호스트명·사용자·부서·프로젝트) — 통계 필터 옵션의 원본
+  meta: () => api.get('/agents/meta'),
+  // 사용량 통계 그래프 — range: '1d'|'7d'|'30d'|'all', team/project 로 필터 가능
+  stateHistory: (range: string, filters?: { team?: string; project?: string }) =>
+    api.get('/agents/state-history', { params: { range, ...(filters || {}) } }),
   // 상태 이력 보관 현황 / 수동 삭제 (보관은 무기한 — 자동 삭제 없음)
   stateHistoryInfo: () => api.get('/agents/state-history/info'),
   stateHistoryDelete: (params: { before?: number; client_id?: string; vacuum?: boolean }) =>

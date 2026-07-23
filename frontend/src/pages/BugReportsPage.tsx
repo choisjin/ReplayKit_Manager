@@ -94,7 +94,18 @@ export default function BugReportsPage() {
       title: '제목', dataIndex: 'title', ellipsis: true,
       render: (v: string, r: BugReport) => <a onClick={() => openDetail(r)}>{v}</a>,
     },
-    { title: '제보자', dataIndex: 'reporter', width: 140, ellipsis: true },
+    {
+      title: '제보자', dataIndex: 'reporter', width: 120, ellipsis: true,
+      render: (v: string, r: BugReport) => r.user_name || v || '-',
+    },
+    {
+      title: '부서', dataIndex: 'user_team', width: 130, ellipsis: true,
+      render: (v: string) => v || '-',
+    },
+    {
+      title: '프로젝트', dataIndex: 'project', width: 90, ellipsis: true,
+      render: (v: string) => v || '-',
+    },
     { title: '호스트', dataIndex: 'hostname', width: 130, ellipsis: true },
     { title: '버전', dataIndex: 'version', width: 90 },
     {

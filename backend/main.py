@@ -573,6 +573,8 @@ from . import agents
 
 # PC별 마지막으로 DB 에 저장한 usage generated_at — 매 2초 write 부하 방지용 스로틀.
 _last_usage_gen: dict[str, str] = {}
+# PC별 마지막으로 DB 에 저장한 로그인 사용자(JSON) — 값이 바뀔 때만 upsert.
+_last_user_json: dict[str, str] = {}
 
 
 @app.get("/api/agents")
@@ -627,7 +629,11 @@ async def _state_sampler():
 
 
 @app.get("/api/agents/state-history")
-async def api_agent_state_history(range_: str = Query("1d", alias="range")):
+async def api_agent_state_history(
+    range_: str = Query("1d", alias="range"),
+    team: str | None = Query(None, description="부서(팀)로 필터 — 해당 부서 사용자가 로그인한 PC 만 집계"),
+    project: str | None = Query(None, description="프로젝트로 필터 (HKMC/Nissan 등)"),
+):
     """사용량 통계 그래프용 — 상태별 시계열/시간대/PC별 집계.
 
     ⚠️ 이 라우트는 반드시 /api/agents/{client_id} **앞**에 선언돼야 한다.
@@ -649,7 +655,20 @@ async def api_agent_state_history(range_: str = Query("1d", alias="range")):
         span, bucket_sec = HISTORY_RANGES[range_]
         since = now - span
 
-    agg = await db.query_state_history(since, bucket_sec)
+    # 부서/프로젝트 필터 → 대상 client_id 집합으로 변환해 SQL 단계에서 거른다.
+    # 매핑은 "현재" 사용자 기준 — 과거 샘플에 사용자를 소급 기록하지는 않는다.
+    client_ids: list[str] | None = None
+    meta = await _merged_agent_meta()
+    if team or project:
+        client_ids = [
+            cid for cid, m in meta.items()
+            if (not team or m.get("user_team") == team)
+            and (not project or m.get("project") == project)
+        ]
+        if not client_ids:
+            client_ids = ["__no_match__"]   # 매칭 PC 없음 → 빈 그래프 (전체로 폴백하지 않게)
+
+    agg = await db.query_state_history(since, bucket_sec, client_ids)
     off = agg["tz_offset_sec"]
 
     # 버킷 격자를 먼저 만들고(빈 구간 포함) 집계를 채운다 —
@@ -670,14 +689,16 @@ async def api_agent_state_history(range_: str = Query("1d", alias="range")):
     for h, state, n in agg["by_hour"]:
         hours[h]["counts"][state] = n
 
-    # PC 이름 — 라이브 레지스트리 우선, 없으면 함수통계 스냅샷의 호스트명
-    names = {k: v for k, v in agents.registry.names().items() if k}
-    hosts = await db.list_agent_usage_hosts()
+    # PC 이름/사용자 메타 — 라이브 레지스트리 우선, 없으면 스냅샷(_merged_agent_meta 가 병합)
     per_agent: dict[str, dict] = {}
     for cid, state, n in agg["by_agent"]:
+        m = meta.get(cid) or {}
         a = per_agent.setdefault(cid, {
             "client_id": cid,
-            "name": names.get(cid) or hosts.get(cid) or cid,
+            "name": m.get("host") or cid,
+            "user_name": m.get("user_name") or "",
+            "user_team": m.get("user_team") or "",
+            "project": m.get("project") or "",
             "samples": 0, "counts": {},
         })
         a["counts"][state] = n
@@ -725,6 +746,41 @@ async def api_state_history_delete(
     return {"status": "ok", "deleted": deleted}
 
 
+async def _merged_agent_meta() -> dict[str, dict]:
+    """client_id → {host, user_name, user_title, user_team, project}.
+
+    DB 스냅샷(오프라인 PC 포함)을 바탕에 깔고 라이브 레지스트리 값을 덮어쓴다 —
+    사용자 변경 직후에도 라이브 값이 우선 보이게.
+    """
+    rows = {m["client_id"]: dict(m) for m in await db.list_agent_meta()}
+    for cid, name in agents.registry.names().items():
+        if not cid:
+            continue
+        m = rows.setdefault(cid, {"client_id": cid, "host": "", "user_name": "",
+                                  "user_title": "", "user_team": "", "project": ""})
+        if name:
+            m["host"] = name
+    for cid, user in agents.registry.users().items():
+        m = rows.get(cid)
+        if not m:
+            continue
+        m["user_name"] = str(user.get("name") or "") or m["user_name"]
+        m["user_title"] = str(user.get("title") or "") or m["user_title"]
+        m["user_team"] = str(user.get("team") or "") or m["user_team"]
+        m["project"] = str(user.get("project") or "") or m["project"]
+    return rows
+
+
+@app.get("/api/agents/meta")
+async def api_agents_meta():
+    """PC별 표시 메타(호스트명·사용자·부서·프로젝트) — 통계 필터 옵션의 원본.
+
+    ⚠️ /api/agents/{client_id} 보다 **앞**에 선언 — 뒤면 "meta" 가 client_id 로 잡힌다.
+    """
+    rows = await _merged_agent_meta()
+    return {"agents": sorted(rows.values(), key=lambda m: (m["host"] or m["client_id"]).lower())}
+
+
 @app.get("/api/agents/{client_id}")
 async def api_agent_detail(client_id: str):
     """단일 PC 상세 (usage_stats 포함). 오프라인이면 DB 스냅샷으로 폴백."""
@@ -759,8 +815,72 @@ async def api_agent_delete(client_id: str):
     await db.delete_agent_usage(client_id)
     await db.delete_state_samples(client_id=client_id)   # 사용량 그래프에서도 사라지게
     _last_usage_gen.pop(client_id, None)
+    _last_user_json.pop(client_id, None)
     logger.info("에이전트 삭제: %s (live=%s)", client_id, removed)
     return {"status": "ok", "removed": removed}
+
+
+# ==================== 로그인(사용자 식별) 설정 ====================
+# ReplayKit 이 시작할 때 이 서버에서 Jira 계정을 받아 유저 검색(로그인)에 쓴다.
+# 계정 관리는 관리자 화면(설정 페이지)에서. 프로젝트/모델 목록은 여기서 내려주지
+# 않는다 — 각 ReplayKit 의 주 디바이스 카탈로그(device_catalog)가 원본이다.
+
+_LOGIN_DEFAULT_JIRA_SERVER = "http://vlm.lge.com/issue"
+_LOGIN_KEYS = ["jira_server", "jira_id", "jira_pw"]
+
+
+async def _load_login_settings() -> dict:
+    s = await db.get_settings_map(_LOGIN_KEYS)
+    return {
+        "jira_server": s.get("jira_server") or _LOGIN_DEFAULT_JIRA_SERVER,
+        "jira_id": s.get("jira_id") or "",
+        "jira_pw": s.get("jira_pw") or "",
+    }
+
+
+@app.get("/api/settings/login")
+async def api_get_login_settings():
+    """관리자 화면용 — Jira 비밀번호는 설정 여부만 노출(값은 되돌려주지 않음)."""
+    cfg = await _load_login_settings()
+    return {
+        "jira_server": cfg["jira_server"],
+        "jira_id": cfg["jira_id"],
+        "jira_pw_set": bool(cfg["jira_pw"]),
+    }
+
+
+class LoginSettingsUpdate(BaseModel):
+    jira_server: Optional[str] = None
+    jira_id: Optional[str] = None
+    jira_pw: Optional[str] = None          # 빈 값/미지정 = 기존 비밀번호 유지
+
+
+@app.put("/api/settings/login")
+async def api_put_login_settings(req: LoginSettingsUpdate):
+    values: dict[str, str] = {}
+    if req.jira_server is not None:
+        values["jira_server"] = req.jira_server.strip()
+    if req.jira_id is not None:
+        values["jira_id"] = req.jira_id.strip()
+    if req.jira_pw:
+        # 빈 문자열은 '변경 안 함' — GET 이 비밀번호를 돌려주지 않아 폼이 빈 값으로 저장될 수 있다
+        values["jira_pw"] = req.jira_pw
+    if values:
+        await db.set_settings_map(values)
+    return await api_get_login_settings()
+
+
+@app.get("/api/login-config")
+async def api_login_config():
+    """ReplayKit 에이전트용 — 시작 시 받아가는 Jira 계정.
+
+    ⚠️ Jira 비밀번호가 응답에 평문으로 포함된다 — 사내망 전용 서비스 전제.
+      (에이전트 백엔드만 호출하고 브라우저에는 노출하지 않는다)
+    """
+    cfg = await _load_login_settings()
+    return {
+        "jira": {"server": cfg["jira_server"], "id": cfg["jira_id"], "pw": cfg["jira_pw"]},
+    }
 
 
 @app.websocket("/ws/client")
@@ -801,6 +921,16 @@ async def ws_client(ws: WebSocket):
                 continue
             if msg.get("type") == "status_update":
                 agents.registry.update_status(client_id, msg, ip)
+                # 로그인 사용자 영속화 — 값이 바뀔 때만 저장(오프라인 후에도 부서/프로젝트 필터에 쓰인다)
+                u = msg.get("user")
+                if isinstance(u, dict) and u:
+                    uj = json.dumps(u, ensure_ascii=False, sort_keys=True)
+                    if _last_user_json.get(client_id) != uj:
+                        _last_user_json[client_id] = uj
+                        try:
+                            await db.upsert_agent_user(client_id, msg.get("name", ""), ip, u)
+                        except Exception as e:
+                            logger.warning("agent user 저장 실패(%s): %s", client_id, e)
                 # 함수통계 스냅샷 영속화 — generated_at 이 바뀔 때만 저장(2초마다 write 방지)
                 us = msg.get("usage_stats")
                 if us:
@@ -879,6 +1009,9 @@ async def submit_bug_report(meta: str = Form(...), file: UploadFile = File(...))
         file_path=str(save_path.relative_to(_PROJECT_ROOT)).replace("\\", "/"),
         file_name=file.filename or "bugreport.zip",
         file_size=size,
+        user_name=str(meta_obj.get("user_name") or ""),
+        user_team=str(meta_obj.get("user_team") or ""),
+        project=str(meta_obj.get("project") or ""),
     )
     logger.info("bug report #%s received: %s (%s, %.1f MB)",
                 report["id"], title, report["reporter"], size / 1048576)
