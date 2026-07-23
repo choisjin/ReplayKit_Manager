@@ -310,52 +310,65 @@ def select_user_dialog(jira, parent=None, group_name: str = "jira-users") -> dic
     return None
 
 
-if __name__ == "__main__":
-    # 단독 실행 데모: 콘솔에서 검색 → 부서/팀 필터 → 번호 선택 → 결과 출력
-    import getpass
+def main():
+    """단독 실행: 로그인 다이얼로그 → 유저 검색 다이얼로그 → 선택 결과 표시."""
+    import sys
+
     from jira import JIRA
+    from PySide6.QtWidgets import (
+        QApplication, QDialog, QDialogButtonBox, QFormLayout,
+        QLineEdit, QMessageBox,
+    )
 
-    user_id = input("Jira ID: ")
-    password = getpass.getpass("Password: ")
-    jira = JIRA(server="http://vlm.lge.com/issue", basic_auth=(user_id, password))
+    app = QApplication(sys.argv)
 
-    mode = input("검색 방식 선택 (1: 키워드 검색, 2: 그룹 전체 로드) [1]: ").strip() or "1"
-    if mode == "2":
-        group = input('그룹명 [jira-users]: ').strip() or "jira-users"
-        results = fetch_group_users(jira, group)
-    else:
-        keyword = input("검색어 (이름/아이디/조직명): ").strip()
-        results = search_users(jira, keyword)
+    class LoginDialog(QDialog):
+        def __init__(self):
+            super().__init__()
+            self.jira = None
+            self.setWindowTitle("Jira 로그인")
+            layout = QFormLayout(self)
+            self.server_edit = QLineEdit("http://vlm.lge.com/issue", self)
+            self.id_edit = QLineEdit(self)
+            self.pw_edit = QLineEdit(self)
+            self.pw_edit.setEchoMode(QLineEdit.Password)
+            layout.addRow("서버:", self.server_edit)
+            layout.addRow("Jira ID:", self.id_edit)
+            layout.addRow("비밀번호:", self.pw_edit)
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+            buttons.accepted.connect(self.try_login)
+            buttons.rejected.connect(self.reject)
+            layout.addRow(buttons)
 
-    if not results:
-        print("검색 결과가 없습니다.")
-        raise SystemExit
+        def try_login(self):
+            if not self.id_edit.text().strip() or not self.pw_edit.text():
+                QMessageBox.warning(self, "입력 필요", "Jira ID와 비밀번호를 입력해주세요.")
+                return
+            try:
+                self.jira = JIRA(
+                    server=self.server_edit.text().strip(),
+                    basic_auth=(self.id_edit.text().strip(), self.pw_edit.text()),
+                    timeout=15, max_retries=0,
+                )
+                self.jira.myself()  # 인증 확인 (실패 시 예외)
+            except Exception as e:
+                self.jira = None
+                QMessageBox.critical(self, "로그인 실패", f"Jira 접속에 실패했습니다:\n{e}")
+                return
+            self.accept()
 
-    # 부서/팀 리스트업 및 필터
-    org_map = build_org_map(results)
-    if org_map:
-        print("\n=== 부서/팀 목록 ===")
-        for dept, teams in org_map.items():
-            print(f"- {dept}: {', '.join(teams) if teams else '(팀 정보 없음)'}")
+    login = LoginDialog()
+    if login.exec() != QDialog.Accepted:
+        return
 
-        dept = input("\n부서 필터 (Enter = 전체): ").strip()
-        team = input("팀 필터 (Enter = 전체): ").strip()
-        results = filter_users(results, dept, team)
+    user = select_user_dialog(login.jira)
+    if user:
+        QMessageBox.information(
+            None, "선택 결과",
+            f"이름: {user['name']}\n직급: {user['title']}\n"
+            f"부서: {user['department']}\n팀: {user['team']}\nID: {user['user_id']}")
 
-    if not results:
-        print("필터 결과가 없습니다.")
-        raise SystemExit
 
-    print(f"\n=== 유저 목록 ({len(results)}명) ===")
-    for i, info in enumerate(results, start=1):
-        print(f"{i:>3}. {info['name']:<12} {info['title']:<8} "
-              f"{info['department']}/{info['team']} ({info['user_id']})")
-
-    choice = input("\n선택할 번호: ").strip()
-    if choice.isdigit() and 1 <= int(choice) <= len(results):
-        user = results[int(choice) - 1]
-        print(f"\n이름: {user['name']}")
-        print(f"부서: {user['department']}")
-        print(f"팀: {user['team']}")
-    else:
-        print("잘못된 번호입니다.")
+if __name__ == "__main__":
+    main()
