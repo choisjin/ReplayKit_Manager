@@ -4,7 +4,7 @@ Jira 유저 검색 모듈 (Python 3.10 기준)
 
 기능:
   1. 키워드(이름/아이디/이메일/조직명)로 Jira 사용자 검색
-  2. 그룹 멤버 전체 로드 → 부서/팀 목록 리스트업
+  2. 프로젝트 할당 가능 사용자 전체 로드 → 부서/팀 목록 리스트업
   3. 부서/팀 콤보박스 필터로 간추린 뒤 선택 → 이름/부서/팀 반환
 
 displayName 형식 가정:
@@ -78,7 +78,8 @@ def search_users(jira, keyword: str, max_results: int = 200) -> list[dict]:
 def fetch_group_users(jira, group_name: str = "jira-users") -> list[dict]:
     """
     그룹 멤버 전체를 한 번에 불러옵니다. (전체 조직/팀 리스트업 용도)
-    인원이 많은 그룹은 수 초 이상 걸릴 수 있습니다.
+    주의: 그룹 조회 API는 Jira 관리자 권한이 필요합니다 (일반 계정은 HTTP 403).
+    일반 계정은 fetch_project_users를 사용하세요.
 
     반환 형식은 search_users와 동일.
     """
@@ -91,6 +92,37 @@ def fetch_group_users(jira, group_name: str = "jira-users") -> list[dict]:
         info["display_name"] = display_name
         info["user_id"] = username
         results.append(info)
+    return results
+
+
+def fetch_project_users(jira, project_key: str = "REAVN", batch: int = 1000) -> list[dict]:
+    """
+    프로젝트에 할당 가능한 사용자 전체를 페이지 단위로 불러옵니다.
+    (전체 조직/팀 리스트업 용도, 일반 계정 권한으로 호출 가능)
+
+    반환 형식은 search_users와 동일.
+    """
+    results = []
+    seen = set()
+    start = 0
+    while True:
+        users = jira.search_assignable_users_for_projects(
+            "", project_key, startAt=start, maxResults=batch)
+        if not users:
+            break
+        for user in users:
+            user_id = getattr(user, "name", "") or ""
+            if user_id in seen:
+                continue
+            seen.add(user_id)
+            display_name = getattr(user, "displayName", "") or ""
+            info = parse_display_name(display_name)
+            info["display_name"] = display_name
+            info["user_id"] = user_id
+            results.append(info)
+        if len(users) < batch:
+            break
+        start += len(users)
     return results
 
 
@@ -121,12 +153,12 @@ def filter_users(users: list[dict], department: str = "", team: str = "") -> lis
     return filtered
 
 
-def select_user_dialog(jira, parent=None, group_name: str = "jira-users") -> dict | None:
+def select_user_dialog(jira, parent=None, project_key: str = "REAVN") -> dict | None:
     """
     유저 검색/필터 다이얼로그를 띄우고, 선택된 사용자 정보를 반환합니다.
 
     - 검색어 입력 → 키워드 검색 (이름/아이디/조직명)
-    - [전체 로드] → 그룹 멤버 전체를 불러와 부서/팀 목록 리스트업
+    - [전체 로드] → 프로젝트 할당 가능 사용자 전체를 불러와 부서/팀 목록 리스트업
     - 부서/팀 콤보박스로 결과를 간추린 뒤 행 선택(더블클릭 또는 OK)
 
     반환: {"name", "title", "department", "team", "display_name", "user_id"}
@@ -165,7 +197,8 @@ def select_user_dialog(jira, parent=None, group_name: str = "jira-users") -> dic
             search_button.clicked.connect(self.do_search)
             load_all_button = QPushButton("전체 로드", self)
             load_all_button.setToolTip(
-                f'그룹 "{group_name}" 멤버 전체를 불러와 부서/팀 목록을 만듭니다.')
+                f'프로젝트 "{project_key}"에 할당 가능한 사용자 전체를 불러와 '
+                "부서/팀 목록을 만듭니다.")
             load_all_button.clicked.connect(self.load_all)
             search_layout.addWidget(self.search_edit)
             search_layout.addWidget(search_button)
@@ -226,11 +259,11 @@ def select_user_dialog(jira, parent=None, group_name: str = "jira-users") -> dic
         def load_all(self):
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
-                results = fetch_group_users(self.jira, group_name)
+                results = fetch_project_users(self.jira, project_key)
             except Exception as e:
                 QMessageBox.critical(
                     self, "로드 실패",
-                    f'그룹 "{group_name}" 멤버를 불러오지 못했습니다:\n{e}')
+                    f'프로젝트 "{project_key}" 사용자를 불러오지 못했습니다:\n{e}')
                 return
             finally:
                 QApplication.restoreOverrideCursor()
