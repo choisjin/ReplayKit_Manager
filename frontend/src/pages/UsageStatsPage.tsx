@@ -46,36 +46,41 @@ const TZ_OFF = -new Date().getTimezoneOffset() * 60;
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 
-/** 버킷 크기에 맞춘 x축 라벨 — 날짜와 시각을 **함께** 표기한다.
- *  시각만 쓰면 길게 스크롤했을 때 지금 보는 구간이 며칠인지 알 수 없다. */
+/** 버킷 크기에 맞춘 x축 라벨 — 연월일·요일과 시각을 **함께** 표기한다.
+ *  시각만 쓰면 길게 스크롤했을 때 지금 보는 구간이 언제인지 알 수 없다. */
 function bucketLabel(t: number, bucketSec: number): string {
   const d = new Date(t * 1000);
-  const day = `${d.getMonth() + 1}/${d.getDate()}`;
+  const day = fmtDay(t);
   if (bucketSec >= 86400) return day;
   if (bucketSec < 3600) return `${day} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   return `${day} ${pad2(d.getHours())}시`;
 }
 
 function bucketTip(t: number, bucketSec: number): string {
-  const s = new Date(t * 1000);
-  const e = new Date((t + bucketSec) * 1000);
-  const day = (d: Date) => `${d.getMonth() + 1}/${d.getDate()}`;
-  if (bucketSec > 86400) return `${day(s)} ~ ${day(e)}`;
-  if (bucketSec === 86400) return `${day(s)} (하루)`;
-  const hm = (d: Date) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-  return `${day(s)} ${hm(s)} ~ ${hm(e)}`;
+  if (bucketSec > 86400) return `${fmtDay(t)} ~ ${fmtDay(t + bucketSec)}`;
+  if (bucketSec === 86400) return `${fmtDay(t)} (하루)`;
+  const hm = (ts: number) => {
+    const d = new Date(ts * 1000);
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  };
+  return `${fmtDay(t)} ${hm(t)} ~ ${hm(t + bucketSec)}`;
 }
 
-/** 라벨 간격(버킷 수) — 라벨끼리 최소 ~90px 은 떨어지도록(날짜+시각을 함께 쓰므로
- *  라벨이 길다). 정각/자정 등 '깔끔한' 시각에 라벨이 붙게 시간 기준으로 거른다. */
-function labelStep(): number {
-  const need = Math.ceil(90 / CELL);
+/** 라벨 간격(버킷 수) — 라벨이 서로 겹치지 않을 최소 픽셀만큼 떨어뜨린다.
+ *  연월일·요일까지 쓰므로 라벨이 길다 — 버킷이 잘게 쪼개질수록(시각까지 붙을수록)
+ *  더 넓게 잡는다. 정각/자정 등 '깔끔한' 시각에 라벨이 붙게 시간 기준으로 거른다. */
+function labelStep(bucketSec: number): number {
+  const px = bucketSec >= 86400 ? 100 : bucketSec >= 3600 ? 120 : 140;
+  const need = Math.ceil(px / CELL);
   return [1, 2, 3, 4, 6, 8, 12, 24, 48].find(s => s >= need) ?? 48;
 }
 
+const WEEKDAY = ['일', '월', '화', '수', '목', '금', '토'];
+
+// 날짜는 연월일 + 요일까지 — "2026.7.23(목)". 요일이 있어야 주말/평일 패턴이 읽힌다.
 function fmtDay(ts: number): string {
   const d = new Date(ts * 1000);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
+  return `${d.getFullYear()}.${d.getMonth() + 1}.${d.getDate()}(${WEEKDAY[d.getDay()]})`;
 }
 
 // 기간 표기는 날짜만이 아니라 시각까지 — "언제부터 언제까지"가 정확히 보이게.
@@ -184,7 +189,7 @@ export default function UsageStatsPage() {
   );
 
   const timeline: Bucket[] = useMemo(() => {
-    const every = zoom * labelStep();
+    const every = zoom * labelStep(zoom);
     return rebucketed.map(b => ({
       key: String(b.t),
       label: (b.t + TZ_OFF) % every === 0 ? bucketLabel(b.t, zoom) : '',
@@ -583,9 +588,11 @@ export default function UsageStatsPage() {
           </span>
         }
         extra={
-          // 날짜별 보기 — '기간 전체' 는 전 기간을 하루로 접은 평균, 날짜 선택 시 그 날만
+          // 날짜별 보기 — '기간 전체' 는 전 기간을 하루로 접은 평균, 날짜 선택 시 그 날만.
+          // 연월일(요일) 라벨이 잘리지 않게 폭을 넉넉히 잡고 목록도 내용 폭에 맞춘다.
           <Select
-            size="small" style={{ width: 110 }}
+            size="small" style={{ width: 150 }}
+            popupMatchSelectWidth={false}
             value={hourlyDay}
             onChange={(v) => setHourlyDay(v)}
             options={[
