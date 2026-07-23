@@ -90,7 +90,15 @@ async def lifespan(app: FastAPI):
     db.init_db()
     logger.info("Admin server started — DB initialized")
     _maybe_open_browser()
+    # 이전 실행에서 닫히지 않고 남은 열린 상태 구간 정리(크래시/재시작 잔재).
+    try:
+        n = await db.close_dangling_state_intervals()
+        if n:
+            logger.info("이전 실행의 열린 상태 구간 %d개 정리", n)
+    except Exception as e:
+        logger.warning("상태 구간 정리 실패: %s", e)
     # 상태 시계열 샘플러 — 사용량 통계 그래프의 원본을 쌓는다(_state_sampler 참고).
+    # (전이 기반 구간 기록 agent_state_intervals 과 병행 — 검증 후 그래프를 구간 기반으로 전환)
     sampler = asyncio.create_task(_state_sampler())
     try:
         yield
@@ -348,6 +356,30 @@ from . import agents
 _last_usage_gen: dict[str, str] = {}
 # PC별 마지막으로 DB 에 저장한 로그인 사용자(JSON) — 값이 바뀔 때만 upsert.
 _last_user_json: dict[str, str] = {}
+# PC별 현재 열려 있는 상태 구간의 state — 값이 바뀔 때만 전이 기록(전이 기반 구간 로그).
+# 이게 있어 상태가 유지되는 동안엔 DB write 가 전혀 없다(샘플링 대비 저장량 급감).
+_open_state: dict[str, str] = {}
+
+
+async def _log_state_transition(client_id: str, activity: str, playback) -> None:
+    """status_update 마다 호출 — 상태가 바뀌었을 때만 구간 전이를 DB 에 기록."""
+    state = agents.derive_online_state(activity, playback)
+    if _open_state.get(client_id) == state:
+        return  # 상태 유지 → write 없음
+    _open_state[client_id] = state
+    try:
+        await db.record_state_transition(client_id, state, int(time.time()))
+    except Exception as e:
+        logger.warning("상태 구간 전이 기록 실패(%s): %s", client_id, e)
+
+
+async def _close_state_interval(client_id: str) -> None:
+    """연결 종료/오프라인 시 열린 구간을 지금 시각으로 닫는다."""
+    _open_state.pop(client_id, None)
+    try:
+        await db.close_state_interval(client_id, int(time.time()))
+    except Exception as e:
+        logger.warning("상태 구간 종료 실패(%s): %s", client_id, e)
 
 
 @app.get("/api/agents")
@@ -490,6 +522,94 @@ async def api_agent_state_history(
     }
 
 
+@app.get("/api/agents/state-history-v2")
+async def api_agent_state_history_v2(
+    range_: str = Query("1d", alias="range"),
+    team: str | None = Query(None, description="부서(팀)로 필터"),
+    project: str | None = Query(None, description="프로젝트로 필터"),
+):
+    """사용량 통계 — **전이 기반 구간**에서 상태별 '실제 지속시간(초)' 을 집계.
+
+    기존 /state-history 는 60초 샘플 개수라 60초 미만 이벤트를 놓치고 경계 오차가 ±60초다.
+    이 라우트는 상태 구간의 길이를 그대로 합산하므로 초 단위로 정확하고 짧은 이벤트도 반영한다.
+    응답 구조는 /state-history 와 맞추되 counts 값이 '초' 이며, 데이터 유무는 span_sec 로 판단한다.
+    검증 후 프론트 그래프를 이 라우트로 전환한다(병행 단계).
+
+    ⚠️ /api/agents/{client_id} 앞에 선언돼야 한다 (경로 충돌 방지).
+    """
+    now = int(time.time())
+    if range_ == "all":
+        st = await db.state_interval_stats()
+        oldest = st.get("oldest_ts")
+        since = int(oldest) if oldest is not None else now - 86400
+        span = max(now - since, 3600)
+        bucket_sec = next(
+            (b for b in ALL_BUCKET_STEPS if span // b <= MAX_HISTORY_BUCKETS),
+            ALL_BUCKET_STEPS[-1],
+        )
+    else:
+        if range_ not in HISTORY_RANGES:
+            range_ = "1d"
+        span, bucket_sec = HISTORY_RANGES[range_]
+        since = now - span
+
+    client_ids: list[str] | None = None
+    meta = await _merged_agent_meta()
+    if team or project:
+        client_ids = [
+            cid for cid, m in meta.items()
+            if (not team or m.get("user_team") == team)
+            and (not project or m.get("project") == project)
+        ]
+        if not client_ids:
+            client_ids = ["__no_match__"]
+
+    agg = await db.query_state_intervals(since, now, bucket_sec, client_ids)
+    off = db._tz_offset_sec()
+
+    def _floor(t: int) -> int:
+        return ((t + off) // bucket_sec) * bucket_sec - off
+
+    # 버킷 격자 — span_sec(그 버킷에서 실제로 데이터가 있던 초)로 '데이터 없음' 을 구분
+    grid: dict[int, dict] = {}
+    b = _floor(since)
+    while b <= _floor(now):
+        grid[b] = {"t": b, "span_sec": agg["bucket_span"].get(b, 0), "counts": {}}
+        b += bucket_sec
+    for bt, state, sec in agg["by_bucket"]:
+        if bt in grid:
+            grid[bt]["counts"][state] = sec
+
+    hours = [{"hour": h, "counts": {}} for h in range(24)]
+    for h, state, sec in agg["by_hour"]:
+        hours[h]["counts"][state] = sec
+
+    per_agent: dict[str, dict] = {}
+    for cid, state, sec in agg["by_agent"]:
+        m = meta.get(cid) or {}
+        a = per_agent.setdefault(cid, {
+            "client_id": cid,
+            "name": m.get("host") or cid,
+            "user_name": m.get("user_name") or "",
+            "user_team": m.get("user_team") or "",
+            "project": m.get("project") or "",
+            "seconds": 0, "counts": {},
+        })
+        a["counts"][state] = sec
+        a["seconds"] += sec
+
+    return {
+        "range": range_,
+        "since": since,
+        "now": now,
+        "bucket_sec": bucket_sec,
+        "metric": "seconds",   # counts 값의 단위 (기존 라우트는 샘플 개수)
+        "buckets": [grid[k] for k in sorted(grid)],
+        "hours": hours,
+        "agents": sorted(per_agent.values(), key=lambda a: a["name"].lower()),
+    }
+
+
 @app.get("/api/agents/state-history/info")
 async def api_state_history_info():
     """상태 이력 보관 현황 (이력 관리 화면용). PC 이름을 붙여 반환한다."""
@@ -587,8 +707,10 @@ async def api_agent_delete(client_id: str):
     removed = agents.registry.remove(client_id)
     await db.delete_agent_usage(client_id)
     await db.delete_state_samples(client_id=client_id)   # 사용량 그래프에서도 사라지게
+    await db.delete_state_intervals(client_id)           # 구간 이력도 함께
     _last_usage_gen.pop(client_id, None)
     _last_user_json.pop(client_id, None)
+    _open_state.pop(client_id, None)
     logger.info("에이전트 삭제: %s (live=%s)", client_id, removed)
     return {"status": "ok", "removed": removed}
 
@@ -694,6 +816,8 @@ async def ws_client(ws: WebSocket):
                 continue
             if msg.get("type") == "status_update":
                 agents.registry.update_status(client_id, msg, ip)
+                # 전이 기반 구간 기록 — 상태가 바뀐 순간에만 1행. (샘플러와 병행)
+                await _log_state_transition(client_id, msg.get("activity", "idle"), msg.get("playback"))
                 # 로그인 사용자 영속화 — 값이 바뀔 때만 저장(오프라인 후에도 부서/프로젝트 필터에 쓰인다)
                 u = msg.get("user")
                 if isinstance(u, dict) and u:
@@ -726,6 +850,8 @@ async def ws_client(ws: WebSocket):
     finally:
         if client_id:
             agents.registry.mark_offline(client_id)
+            # 열린 상태 구간을 지금 시각으로 닫는다 (오프라인은 어떤 상태에도 누적하지 않음).
+            await _close_state_interval(client_id)
 
 
 # ==================== 버그 리포트 API ====================

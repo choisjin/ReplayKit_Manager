@@ -362,16 +362,26 @@ export default function FleetPage() {
             boxShadow: quiet ? undefined : `0 2px 8px ${tint(c, 0.22)}`,
           }}
         >
-          {/* 1행 — 상태점 + 호스트명(말줄임) + OS + 삭제(오프라인만) */}
+          {/* 1행(메인) — 상태점 + 로그인 사용자(굵게) + 프로젝트 + 삭제(오프라인만)
+              로그인 정보가 관제에서 가장 먼저 찾는 값이라 호스트명 대신 맨 위에 크게 둔다. */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
             <Badge status={a.online ? 'success' : 'default'} />
-            <Tooltip title={hostTooltip(a)}>
-              <Typography.Text strong ellipsis style={{ flex: 1, minWidth: 0, fontSize: 12 }}>
-                {a.name || a.client_id}
-              </Typography.Text>
+            <Tooltip title={userTooltip(a)}>
+              {a.user ? (
+                <Typography.Text strong ellipsis style={{ flex: 1, minWidth: 0, fontSize: 12 }}>
+                  <UserOutlined /> {a.user.name}
+                  {a.user.team && <span style={{ opacity: 0.65, fontWeight: 'normal' }}> · {a.user.team}</span>}
+                </Typography.Text>
+              ) : (
+                <Typography.Text ellipsis style={{ flex: 1, minWidth: 0, fontSize: 12, opacity: 0.45 }}>
+                  <UserOutlined /> 미로그인
+                </Typography.Text>
+              )}
             </Tooltip>
-            {a.os && (
-              <Tag color={a.os === 'Linux' ? 'gold' : 'geekblue'} style={MINI_TAG}>{a.os}</Tag>
+            {a.user?.project && (
+              <Tag color="blue" style={MINI_TAG}>
+                {a.user.project}{a.user.model ? `·${a.user.model}` : ''}
+              </Tag>
             )}
             {!a.online && (
               <Tooltip title="목록에서 제거 (다시 접속하면 재등록)">
@@ -405,26 +415,17 @@ export default function FleetPage() {
             )}
           </div>
 
-          {/* 3행 — 사용자/부서 + 프로젝트 (미로그인도 같은 높이 유지) */}
-          <Tooltip title={userTooltip(a)}>
+          {/* 3행 — PC 정보(호스트명 + OS). 메인 자리를 로그인 정보에 내주고 보조로 내려왔다. */}
+          <Tooltip title={hostTooltip(a)}>
             <div style={{
               marginTop: 4, height: 17, display: 'flex', alignItems: 'center', gap: 4,
               fontSize: 10, overflow: 'hidden', whiteSpace: 'nowrap', cursor: 'default',
             }}>
-              {a.user ? (
-                <>
-                  <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    <UserOutlined /> {a.user.name}
-                    {a.user.team && <span style={{ opacity: 0.65 }}> · {a.user.team}</span>}
-                  </span>
-                  {a.user.project && (
-                    <Tag color="blue" style={MINI_TAG}>
-                      {a.user.project}{a.user.model ? `·${a.user.model}` : ''}
-                    </Tag>
-                  )}
-                </>
-              ) : (
-                <span style={{ opacity: 0.45 }}><UserOutlined /> 미로그인</span>
+              <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', opacity: 0.75 }}>
+                <DesktopOutlined /> {a.name || a.client_id}
+              </span>
+              {a.os && (
+                <Tag color={a.os === 'Linux' ? 'gold' : 'geekblue'} style={MINI_TAG}>{a.os}</Tag>
               )}
             </div>
           </Tooltip>

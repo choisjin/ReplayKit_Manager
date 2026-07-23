@@ -56,6 +56,22 @@ def init_db():
             PRIMARY KEY (ts, client_id)
         ) WITHOUT ROWID;
 
+        -- 상태 '구간' 이력 (전이 기반, 60초 샘플링을 대체할 정밀 원본).
+        -- 상태가 바뀔 때만 1행 기록: [start_ts, end_ts) 동안 그 state 였다는 뜻.
+        -- end_ts IS NULL = 아직 진행 중인(열린) 구간. 지속시간 = end_ts - start_ts (초).
+        -- 샘플링과 달리 오래 유지되는 상태가 1행이라 저장량이 훨씬 적고, 짧은 구간도
+        -- 길이 그대로 남아 60초 미만 이벤트가 누락되지 않는다.
+        CREATE TABLE IF NOT EXISTS agent_state_intervals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            start_ts INTEGER NOT NULL,   -- epoch 초 (구간 시작)
+            end_ts INTEGER               -- epoch 초 (구간 끝). NULL = 진행 중
+        );
+        -- 열린 구간 조회(전이/종료 시)와 기간 겹침 집계용 인덱스
+        CREATE INDEX IF NOT EXISTS idx_intervals_open ON agent_state_intervals(client_id, end_ts);
+        CREATE INDEX IF NOT EXISTS idx_intervals_range ON agent_state_intervals(end_ts, start_ts);
+
         -- 클라이언트(ReplayKit)가 제출한 버그 리포트. ZIP 본문은 디스크
         -- (bug_reports/ 디렉토리)에 두고 여기는 메타만 영속화한다.
         CREATE TABLE IF NOT EXISTS bug_reports (
@@ -366,6 +382,171 @@ async def insert_state_samples(ts: int, rows: list[tuple[str, str]]) -> None:
         conn.commit()
         conn.close()
     await asyncio.to_thread(_run)
+
+
+# --- 상태 구간(전이 기반) — 정밀 사용량 통계 원본 ---
+
+async def record_state_transition(client_id: str, state: str, ts: int) -> None:
+    """PC 의 상태 전이를 구간으로 기록.
+
+    호출 측(main.py)이 '상태가 실제로 바뀐 경우에만' 부른다. 하는 일:
+      1) 이 PC 의 열린 구간(end_ts IS NULL)을 ts 로 닫는다.
+      2) 새 상태로 열린 구간을 하나 연다.
+    같은 ts 로 닫고 열어야 구간이 빈틈없이 이어져 집계가 정확하다.
+    (start_ts > ts 인 이상치는 방어적으로 버린다 — 시계 역행 대비)
+    """
+    def _run():
+        conn = get_conn()
+        conn.execute(
+            "UPDATE agent_state_intervals SET end_ts=? "
+            "WHERE client_id=? AND end_ts IS NULL AND start_ts<=?",
+            (ts, client_id, ts),
+        )
+        # 시계 역행 등으로 못 닫은 열린 구간이 남으면 새 구간과 겹치므로 함께 정리
+        conn.execute(
+            "UPDATE agent_state_intervals SET end_ts=start_ts "
+            "WHERE client_id=? AND end_ts IS NULL",
+            (client_id,),
+        )
+        conn.execute(
+            "INSERT INTO agent_state_intervals (client_id, state, start_ts, end_ts) "
+            "VALUES (?, ?, ?, NULL)",
+            (client_id, state, ts),
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_run)
+
+
+async def close_state_interval(client_id: str, ts: int) -> None:
+    """PC 의 열린 구간을 ts 로 닫는다 (연결 종료/오프라인 시)."""
+    def _run():
+        conn = get_conn()
+        conn.execute(
+            "UPDATE agent_state_intervals SET end_ts=? "
+            "WHERE client_id=? AND end_ts IS NULL AND start_ts<=?",
+            (ts, client_id, ts),
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_run)
+
+
+async def close_dangling_state_intervals() -> int:
+    """서버 재시작 시 남아 있던 열린 구간을 정리 (end_ts=start_ts, 0 길이).
+
+    크래시/재시작 전의 마지막 구간은 실제 종료 시각을 알 수 없으므로 0 길이로 닫아
+    시간을 과대계상하지 않는다(그 구간 손실은 재시작 경계에서만, 드물고 작다).
+    반환: 정리한 구간 수.
+    """
+    def _run():
+        conn = get_conn()
+        cur = conn.execute(
+            "UPDATE agent_state_intervals SET end_ts=start_ts WHERE end_ts IS NULL"
+        )
+        conn.commit()
+        n = cur.rowcount
+        conn.close()
+        return n
+    return await asyncio.to_thread(_run)
+
+
+async def query_state_intervals(since_ts: int, now_ts: int, bucket_sec: int,
+                                client_ids: list[str] | None = None) -> dict:
+    """구간 이력을 '실제 지속시간(초)' 으로 집계 — query_state_history 의 duration 판.
+
+    각 구간을 [since_ts, now_ts] 로 클립하고 버킷 경계로 잘라 상태별 초를 합산한다.
+    열린 구간(end_ts NULL)은 now_ts 까지 진행 중으로 본다.
+    카운트가 '초' 인 점만 다르고 응답 구조는 query_state_history 와 동일하다:
+      - by_bucket : (bucket_start, state, seconds)
+      - by_hour   : (hour 0~23, state, seconds)
+      - by_agent  : (client_id, state, seconds)
+    (버킷은 로컬 시각 기준으로 잘라 하루 경계가 KST 09시에서 끊기지 않게 한다)
+    """
+    off = _tz_offset_sec()
+
+    def _run():
+        conn = get_conn()
+        where = "start_ts < ? AND COALESCE(end_ts, ?) > ?"  # 구간이 [since, now] 와 겹침
+        params: list = [now_ts, now_ts, since_ts]
+        if client_ids:
+            where += f" AND client_id IN ({','.join('?' for _ in client_ids)})"
+            params.extend(client_ids)
+        rows = conn.execute(
+            f"SELECT client_id, state, start_ts, COALESCE(end_ts, ?) AS end_ts "
+            f"FROM agent_state_intervals WHERE {where}",
+            [now_ts, *params],
+        ).fetchall()
+        conn.close()
+
+        by_bucket: dict[tuple[int, str], int] = {}
+        by_hour: dict[tuple[int, str], int] = {}
+        by_agent: dict[tuple[str, str], int] = {}
+        bucket_span: dict[int, int] = {}   # 버킷별 커버된 초(데이터 유무 판단용)
+
+        for r in rows:
+            state = r["state"]
+            cid = r["client_id"]
+            s = max(int(r["start_ts"]), since_ts)
+            e = min(int(r["end_ts"]), now_ts)
+            if e <= s:
+                continue
+            by_agent[(cid, state)] = by_agent.get((cid, state), 0) + (e - s)
+            # 버킷/시간대 경계로 잘라 배분 (로컬시각 기준)
+            t = s
+            while t < e:
+                b = ((t + off) // bucket_sec) * bucket_sec - off       # 이 버킷 시작(epoch)
+                b_end = b + bucket_sec
+                seg_end = min(e, b_end)
+                dur = seg_end - t
+                by_bucket[(b, state)] = by_bucket.get((b, state), 0) + dur
+                bucket_span[b] = bucket_span.get(b, 0) + dur
+                h = ((t + off) // 3600) % 24                            # 이 조각의 시간대
+                # 조각이 시간 경계를 넘을 수 있으나, 사용량 통계 용도상 시작 시각의
+                # 시간대에 통째로 넣어도 왜곡이 작다(버킷 그래프가 주지표).
+                by_hour[(h, state)] = by_hour.get((h, state), 0) + dur
+                t = seg_end
+
+        return {
+            "by_bucket": [(b, s, n) for (b, s), n in by_bucket.items()],
+            "bucket_span": bucket_span,
+            "by_hour": [(h, s, n) for (h, s), n in by_hour.items()],
+            "by_agent": [(c, s, n) for (c, s), n in by_agent.items()],
+        }
+    return await asyncio.to_thread(_run)
+
+
+async def delete_state_intervals(client_id: str) -> int:
+    """특정 PC 의 구간 이력 삭제 (에이전트 삭제 시). 반환: 지운 행 수."""
+    def _run():
+        conn = get_conn()
+        cur = conn.execute("DELETE FROM agent_state_intervals WHERE client_id=?", (client_id,))
+        conn.commit()
+        n = cur.rowcount
+        conn.close()
+        return n
+    return await asyncio.to_thread(_run)
+
+
+async def state_interval_stats() -> dict:
+    """구간 이력 보관 현황 (검증/디버그용) — 행 수·기간·열린 구간 수."""
+    def _run():
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) AS rows, MIN(start_ts) AS oldest, MAX(COALESCE(end_ts, start_ts)) AS newest, "
+            "COUNT(DISTINCT client_id) AS agents, "
+            "SUM(CASE WHEN end_ts IS NULL THEN 1 ELSE 0 END) AS open_rows "
+            "FROM agent_state_intervals"
+        ).fetchone()
+        conn.close()
+        return {
+            "rows": row["rows"] or 0,
+            "agents": row["agents"] or 0,
+            "open_rows": row["open_rows"] or 0,
+            "oldest_ts": row["oldest"],
+            "newest_ts": row["newest"],
+        }
+    return await asyncio.to_thread(_run)
 
 
 async def state_sample_stats() -> dict:

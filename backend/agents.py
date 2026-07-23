@@ -22,6 +22,22 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def derive_online_state(activity: str | None, playback: dict | None) -> str:
+    """온라인 PC 의 activity → 그래프 state (오프라인은 호출 측이 따로 판정).
+
+    프론트 agentState.ts 의 StateKey 와 같은 값이어야 한다:
+    재생중(playing)/일시정지(paused)/녹화중(recording)/사용중(in_use)/대기(idle).
+    상태 샘플(sample_states)과 구간 기록(전이 로그)이 **같은 규칙**을 쓰도록 한 곳에 둔다.
+    """
+    act = activity or "idle"
+    if act == "playing":
+        pb = playback or {}
+        return "paused" if pb.get("status") == "paused" else "playing"
+    if act in ("recording", "in_use"):
+        return act
+    return "idle"
+
+
 def _parse_iso(s: str | None) -> datetime | None:
     if not s:
         return None
@@ -208,14 +224,7 @@ class AgentRegistry:
             if not self._is_online(st):
                 state = "offline"
             else:
-                act = st.get("activity", "idle")
-                if act == "playing":
-                    pb = st.get("playback") or {}
-                    state = "paused" if pb.get("status") == "paused" else "playing"
-                elif act in ("recording", "in_use"):
-                    state = act
-                else:
-                    state = "idle"
+                state = derive_online_state(st.get("activity", "idle"), st.get("playback"))
             out.append((cid, state))
         return out
 
