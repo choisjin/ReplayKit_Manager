@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Jira 이슈에서 인원(Reporter, Assignee, Watcher)을 수집하고
-displayName에서 조직(부서/팀)을 중복 없이 추출하는 모듈.
+Jira 유저 검색 모듈 (Python 3.10 기준)
+
+기능:
+  1. 키워드(이름/아이디/이메일/조직명)로 Jira 사용자 검색
+  2. 그룹 멤버 전체 로드 → 부서/팀 목록 리스트업
+  3. 부서/팀 콤보박스 필터로 간추린 뒤 선택 → 이름/부서/팀 반환
 
 displayName 형식 가정:
     "김재형(협력사) 책임연구원/VS TC설계/검증자동화팀"
@@ -9,38 +13,26 @@ displayName 형식 가정:
 
 다른 프로젝트에서 사용 예:
     from jira import JIRA
-    from person_org_search import extract_people, extract_organizations
+    from person_org_search import select_user_dialog
 
     jira = JIRA(server="http://vlm.lge.com/issue", basic_auth=(user_id, password))
 
-    # 조직 목록 (중복 제거, 정렬됨)
-    orgs = extract_organizations(jira, 'project = REAVN AND status = Open')
-    # → ["VS TC설계/검증자동화팀", "VS플랫폼개발팀", ...]
-
-    # 인원 목록 (displayName 기준 중복 제거)
-    people = extract_people(jira, 'project = REAVN AND status = Open')
-    # → [{"name": "김재형(협력사)", "title": "책임연구원",
-    #     "department": "VS TC설계", "team": "검증자동화팀",
-    #     "organization": "VS TC설계/검증자동화팀",
-    #     "display_name": "...", "user_id": "jaehyung04.kim"}, ...]
+    user = select_user_dialog(jira, parent=self)   # 검색/필터 다이얼로그
+    if user:
+        print(user["name"], user["department"], user["team"])
 """
 
 
-def parse_display_name(display_name):
+def parse_display_name(display_name: str) -> dict:
     """
     displayName을 이름/직급/부서/팀으로 분해합니다.
 
     예: "김재형(협력사) 책임연구원/VS TC설계/검증자동화팀"
-    반환: {
-        "name": "김재형(협력사)",
-        "title": "책임연구원",
-        "department": "VS TC설계",
-        "team": "검증자동화팀",
-        "organization": "VS TC설계/검증자동화팀",
-    }
+    반환: {"name": "김재형(협력사)", "title": "책임연구원",
+           "department": "VS TC설계", "team": "검증자동화팀"}
     부서/팀 정보가 없으면 해당 값은 빈 문자열.
     """
-    result = {"name": "", "title": "", "department": "", "team": "", "organization": ""}
+    result = {"name": "", "title": "", "department": "", "team": ""}
     if not display_name:
         return result
 
@@ -57,84 +49,313 @@ def parse_display_name(display_name):
     if len(parts) >= 3:
         result["team"] = "/".join(parts[2:])  # 팀명에 '/'가 더 있어도 보존
 
-    if len(parts) >= 2:
-        result["organization"] = "/".join(parts[1:])
-
     return result
 
 
-def collect_issue_users(jira, issue, include_watchers=True):
+def search_users(jira, keyword: str, max_results: int = 200) -> list[dict]:
     """
-    이슈 하나에서 Reporter, Assignee, Watcher 사용자 객체를 모아 반환합니다.
-    Watcher는 이슈당 API 1회 호출이 추가로 발생합니다.
+    키워드로 Jira 사용자를 검색합니다.
+    displayName에 조직명이 포함되므로 팀명(예: "검증자동화팀")으로도 검색 가능합니다.
+
+    반환: 사용자별 {"name", "title", "department", "team",
+                    "display_name", "user_id"} dict 리스트
     """
-    users = []
+    if not keyword or not keyword.strip():
+        return []
 
-    reporter = getattr(issue.fields, "reporter", None)
-    if reporter:
-        users.append(reporter)
+    users = jira.search_users(keyword.strip(), maxResults=max_results)
 
-    assignee = getattr(issue.fields, "assignee", None)
-    if assignee:
-        users.append(assignee)
-
-    if include_watchers:
-        try:
-            users.extend(jira.watchers(issue.key).watchers)
-        except Exception as e:
-            print(f"[WARN] {issue.key} watcher 조회 실패: {e}")
-
-    return users
+    results = []
+    for user in users:
+        display_name = getattr(user, "displayName", "") or ""
+        info = parse_display_name(display_name)
+        info["display_name"] = display_name
+        info["user_id"] = getattr(user, "name", "") or ""  # Jira Server 계정 ID
+        results.append(info)
+    return results
 
 
-def extract_people(jira, jql, include_watchers=True, max_results=100):
+def fetch_group_users(jira, group_name: str = "jira-users") -> list[dict]:
     """
-    JQL 검색 결과의 모든 이슈에서 인원을 수집하고,
-    displayName 기준으로 중복을 제거한 인원 정보 리스트를 반환합니다.
+    그룹 멤버 전체를 한 번에 불러옵니다. (전체 조직/팀 리스트업 용도)
+    인원이 많은 그룹은 수 초 이상 걸릴 수 있습니다.
+
+    반환 형식은 search_users와 동일.
     """
-    issues = jira.search_issues(jql, maxResults=max_results, fields="reporter,assignee")
+    members = jira.group_members(group_name)  # {username: {"fullname", "email", "active"}}
 
-    seen = {}  # display_name → 인원 정보 (중복 제거용)
-    for issue in issues:
-        for user in collect_issue_users(jira, issue, include_watchers):
-            display_name = getattr(user, "displayName", "") or ""
-            if not display_name or display_name in seen:
-                continue
-
-            info = parse_display_name(display_name)
-            info["display_name"] = display_name
-            info["user_id"] = getattr(user, "name", "") or ""  # Jira Server 계정 ID
-            seen[display_name] = info
-
-    return list(seen.values())
+    results = []
+    for username, data in members.items():
+        display_name = data.get("fullname", "") or ""
+        info = parse_display_name(display_name)
+        info["display_name"] = display_name
+        info["user_id"] = username
+        results.append(info)
+    return results
 
 
-def extract_organizations(jira, jql, include_watchers=True, max_results=100):
+def build_org_map(users: list[dict]) -> dict[str, list[str]]:
     """
-    JQL 검색 결과에서 조직("부서/팀") 목록을 중복 없이 정렬하여 반환합니다.
-    조직 정보가 없는 사용자(displayName에 '/'가 없는 경우)는 제외됩니다.
+    유저 목록에서 {부서: [팀, ...]} 매핑을 중복 없이 만듭니다.
+    부서 정보가 없는 유저는 제외됩니다.
     """
-    people = extract_people(jira, jql, include_watchers, max_results)
-    orgs = {p["organization"] for p in people if p["organization"]}
-    return sorted(orgs)
+    org_map: dict[str, set[str]] = {}
+    for user in users:
+        dept = user.get("department", "")
+        if not dept:
+            continue
+        org_map.setdefault(dept, set())
+        team = user.get("team", "")
+        if team:
+            org_map[dept].add(team)
+    return {dept: sorted(teams) for dept, teams in sorted(org_map.items())}
+
+
+def filter_users(users: list[dict], department: str = "", team: str = "") -> list[dict]:
+    """부서/팀으로 유저 목록을 필터링합니다. 빈 문자열은 '전체'로 취급."""
+    filtered = users
+    if department:
+        filtered = [u for u in filtered if u.get("department") == department]
+    if team:
+        filtered = [u for u in filtered if u.get("team") == team]
+    return filtered
+
+
+def select_user_dialog(jira, parent=None, group_name: str = "jira-users") -> dict | None:
+    """
+    유저 검색/필터 다이얼로그를 띄우고, 선택된 사용자 정보를 반환합니다.
+
+    - 검색어 입력 → 키워드 검색 (이름/아이디/조직명)
+    - [전체 로드] → 그룹 멤버 전체를 불러와 부서/팀 목록 리스트업
+    - 부서/팀 콤보박스로 결과를 간추린 뒤 행 선택(더블클릭 또는 OK)
+
+    반환: {"name", "title", "department", "team", "display_name", "user_id"}
+          취소 시 None
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import (
+        QApplication, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
+        QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
+        QTableWidgetItem, QVBoxLayout,
+    )
+
+    ALL = "전체"
+
+    class UserSearchDialog(QDialog):
+        HEADERS = ["이름", "직급", "부서", "팀", "ID"]
+
+        def __init__(self, jira, parent=None):
+            super().__init__(parent)
+            self.jira = jira
+            self.all_results: list[dict] = []       # 검색/로드된 전체 유저
+            self.filtered_results: list[dict] = []  # 필터 적용 후 유저
+            self.selected_user: dict | None = None
+
+            self.setWindowTitle("유저 검색")
+            self.resize(640, 480)
+
+            layout = QVBoxLayout(self)
+
+            # 1행: 검색어 입력 + 검색 + 전체 로드
+            search_layout = QHBoxLayout()
+            self.search_edit = QLineEdit(self)
+            self.search_edit.setPlaceholderText("이름 / 아이디 / 조직명 입력 후 Enter")
+            self.search_edit.returnPressed.connect(self.do_search)
+            search_button = QPushButton("검색", self)
+            search_button.clicked.connect(self.do_search)
+            load_all_button = QPushButton("전체 로드", self)
+            load_all_button.setToolTip(
+                f'그룹 "{group_name}" 멤버 전체를 불러와 부서/팀 목록을 만듭니다.')
+            load_all_button.clicked.connect(self.load_all)
+            search_layout.addWidget(self.search_edit)
+            search_layout.addWidget(search_button)
+            search_layout.addWidget(load_all_button)
+            layout.addLayout(search_layout)
+
+            # 2행: 부서/팀 필터 콤보박스
+            filter_layout = QHBoxLayout()
+            filter_layout.addWidget(QLabel("부서:", self))
+            self.dept_combo = QComboBox(self)
+            self.dept_combo.currentTextChanged.connect(self.on_dept_changed)
+            filter_layout.addWidget(self.dept_combo, stretch=1)
+            filter_layout.addWidget(QLabel("팀:", self))
+            self.team_combo = QComboBox(self)
+            self.team_combo.currentTextChanged.connect(self.apply_filter)
+            filter_layout.addWidget(self.team_combo, stretch=1)
+            reset_button = QPushButton("필터 초기화", self)
+            reset_button.clicked.connect(self.reset_filter)
+            filter_layout.addWidget(reset_button)
+            layout.addLayout(filter_layout)
+
+            # 결과 테이블
+            self.table = QTableWidget(0, len(self.HEADERS), self)
+            self.table.setHorizontalHeaderLabels(self.HEADERS)
+            self.table.setSelectionBehavior(QTableWidget.SelectRows)
+            self.table.setSelectionMode(QTableWidget.SingleSelection)
+            self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+            self.table.doubleClicked.connect(self.accept_selection)
+            layout.addWidget(self.table)
+
+            # 상태 표시 + OK/Cancel
+            self.status_label = QLabel("", self)
+            layout.addWidget(self.status_label)
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+            buttons.accepted.connect(self.accept_selection)
+            buttons.rejected.connect(self.reject)
+            layout.addWidget(buttons)
+
+        # --- 데이터 로드 ---
+
+        def do_search(self):
+            keyword = self.search_edit.text().strip()
+            if not keyword:
+                QMessageBox.warning(self, "검색어 없음", "검색어를 입력해주세요.")
+                return
+            try:
+                results = search_users(self.jira, keyword)
+            except Exception as e:
+                QMessageBox.critical(self, "검색 실패", f"유저 검색 중 오류 발생:\n{e}")
+                return
+            if not results:
+                QMessageBox.information(self, "검색 결과 없음",
+                                        f'"{keyword}"에 해당하는 사용자가 없습니다.')
+                return
+            self.set_results(results)
+
+        def load_all(self):
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                results = fetch_group_users(self.jira, group_name)
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "로드 실패",
+                    f'그룹 "{group_name}" 멤버를 불러오지 못했습니다:\n{e}')
+                return
+            finally:
+                QApplication.restoreOverrideCursor()
+            self.set_results(results)
+
+        def set_results(self, results: list[dict]):
+            """새 유저 목록을 반영하고 부서/팀 콤보박스를 다시 구성합니다."""
+            self.all_results = results
+            self.org_map = build_org_map(results)
+
+            self.dept_combo.blockSignals(True)
+            self.dept_combo.clear()
+            self.dept_combo.addItem(ALL)
+            self.dept_combo.addItems(list(self.org_map.keys()))
+            self.dept_combo.blockSignals(False)
+
+            self.rebuild_team_combo()
+            self.apply_filter()
+
+        # --- 필터링 ---
+
+        def rebuild_team_combo(self):
+            """선택된 부서에 속한 팀 목록으로 팀 콤보박스를 갱신합니다."""
+            dept = self.dept_combo.currentText()
+            self.team_combo.blockSignals(True)
+            self.team_combo.clear()
+            self.team_combo.addItem(ALL)
+            if dept == ALL:
+                teams = sorted({t for ts in self.org_map.values() for t in ts})
+            else:
+                teams = self.org_map.get(dept, [])
+            self.team_combo.addItems(teams)
+            self.team_combo.blockSignals(False)
+
+        def on_dept_changed(self, _text):
+            self.rebuild_team_combo()
+            self.apply_filter()
+
+        def reset_filter(self):
+            self.dept_combo.setCurrentText(ALL)
+
+        def apply_filter(self, _text=None):
+            dept = self.dept_combo.currentText()
+            team = self.team_combo.currentText()
+            self.filtered_results = filter_users(
+                self.all_results,
+                department="" if dept == ALL else dept,
+                team="" if team == ALL else team,
+            )
+            self.update_table()
+
+        def update_table(self):
+            self.table.setRowCount(0)
+            for row, info in enumerate(self.filtered_results):
+                self.table.insertRow(row)
+                values = [info["name"], info["title"], info["department"],
+                          info["team"], info["user_id"]]
+                for col, value in enumerate(values):
+                    self.table.setItem(row, col, QTableWidgetItem(value))
+            self.table.resizeColumnsToContents()
+            self.status_label.setText(
+                f"{len(self.filtered_results)}명 표시 (전체 {len(self.all_results)}명)")
+
+        # --- 선택 ---
+
+        def accept_selection(self):
+            row = self.table.currentRow()
+            if row < 0 or row >= len(self.filtered_results):
+                QMessageBox.warning(self, "선택 없음", "사용자를 선택해주세요.")
+                return
+            self.selected_user = self.filtered_results[row]
+            self.accept()
+
+    dialog = UserSearchDialog(jira, parent)
+    if dialog.exec() == QDialog.Accepted:
+        return dialog.selected_user
+    return None
 
 
 if __name__ == "__main__":
-    # 단독 실행 데모: 로그인 후 JQL로 조직 목록 출력
+    # 단독 실행 데모: 콘솔에서 검색 → 부서/팀 필터 → 번호 선택 → 결과 출력
     import getpass
     from jira import JIRA
 
     user_id = input("Jira ID: ")
     password = getpass.getpass("Password: ")
-    jql = input("JQL (기본: project = REAVN AND status = Open): ").strip() \
-        or "project = REAVN AND status = Open"
-
     jira = JIRA(server="http://vlm.lge.com/issue", basic_auth=(user_id, password))
 
-    print("\n=== 조직 목록 (중복 제거) ===")
-    for org in extract_organizations(jira, jql):
-        print(org)
+    mode = input("검색 방식 선택 (1: 키워드 검색, 2: 그룹 전체 로드) [1]: ").strip() or "1"
+    if mode == "2":
+        group = input('그룹명 [jira-users]: ').strip() or "jira-users"
+        results = fetch_group_users(jira, group)
+    else:
+        keyword = input("검색어 (이름/아이디/조직명): ").strip()
+        results = search_users(jira, keyword)
 
-    print("\n=== 인원 목록 (중복 제거) ===")
-    for p in extract_people(jira, jql):
-        print(f"{p['name']:<12} {p['title']:<8} {p['organization']:<30} {p['user_id']}")
+    if not results:
+        print("검색 결과가 없습니다.")
+        raise SystemExit
+
+    # 부서/팀 리스트업 및 필터
+    org_map = build_org_map(results)
+    if org_map:
+        print("\n=== 부서/팀 목록 ===")
+        for dept, teams in org_map.items():
+            print(f"- {dept}: {', '.join(teams) if teams else '(팀 정보 없음)'}")
+
+        dept = input("\n부서 필터 (Enter = 전체): ").strip()
+        team = input("팀 필터 (Enter = 전체): ").strip()
+        results = filter_users(results, dept, team)
+
+    if not results:
+        print("필터 결과가 없습니다.")
+        raise SystemExit
+
+    print(f"\n=== 유저 목록 ({len(results)}명) ===")
+    for i, info in enumerate(results, start=1):
+        print(f"{i:>3}. {info['name']:<12} {info['title']:<8} "
+              f"{info['department']}/{info['team']} ({info['user_id']})")
+
+    choice = input("\n선택할 번호: ").strip()
+    if choice.isdigit() and 1 <= int(choice) <= len(results):
+        user = results[int(choice) - 1]
+        print(f"\n이름: {user['name']}")
+        print(f"부서: {user['department']}")
+        print(f"팀: {user['team']}")
+    else:
+        print("잘못된 번호입니다.")
