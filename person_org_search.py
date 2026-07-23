@@ -95,34 +95,74 @@ def fetch_group_users(jira, group_name: str = "jira-users") -> list[dict]:
     return results
 
 
+def _users_from_assignable_api(jira, project_key: str, batch: int = 1000,
+                               max_users: int = 10000) -> list[dict]:
+    """
+    user/assignable/search 엔드포인트를 username 파라미터 없이 직접 호출해
+    프로젝트에 할당 가능한 사용자 전체를 페이지 단위로 가져옵니다.
+    (jira 라이브러리 메서드는 username을 강제하므로 REST를 직접 호출)
+    """
+    raw = []
+    start = 0
+    while start < max_users:
+        page = jira._get_json(
+            "user/assignable/search",
+            params={"project": project_key, "startAt": start, "maxResults": batch})
+        if not page:
+            break
+        raw.extend(page)
+        if len(page) < batch:
+            break
+        start += len(page)
+    return raw
+
+
+def _users_from_issues(jira, project_key: str, max_issues: int = 500) -> list[dict]:
+    """프로젝트 이슈의 Reporter/Assignee를 모아 사용자 목록을 만듭니다. (폴백)"""
+    issues = jira.search_issues(
+        f"project = {project_key}", maxResults=max_issues, fields="reporter,assignee")
+    raw = []
+    for issue in issues:
+        for user in (getattr(issue.fields, "reporter", None),
+                     getattr(issue.fields, "assignee", None)):
+            if user:
+                raw.append({
+                    "displayName": getattr(user, "displayName", "") or "",
+                    "name": getattr(user, "name", "") or "",
+                })
+    return raw
+
+
 def fetch_project_users(jira, project_key: str = "REAVN", batch: int = 1000) -> list[dict]:
     """
-    프로젝트에 할당 가능한 사용자 전체를 페이지 단위로 불러옵니다.
-    (전체 조직/팀 리스트업 용도, 일반 계정 권한으로 호출 가능)
+    프로젝트 사용자 전체를 불러옵니다. (전체 조직/팀 리스트업 용도)
+    일반 계정 권한으로 호출 가능합니다.
+
+    1차: 할당 가능 사용자 API → 결과가 없으면
+    2차: 프로젝트 이슈의 Reporter/Assignee 수집으로 폴백.
 
     반환 형식은 search_users와 동일.
     """
+    try:
+        raw = _users_from_assignable_api(jira, project_key, batch)
+    except Exception:
+        raw = []
+    if not raw:
+        raw = _users_from_issues(jira, project_key)
+
     results = []
     seen = set()
-    start = 0
-    while True:
-        users = jira.search_assignable_users_for_projects(
-            "", project_key, startAt=start, maxResults=batch)
-        if not users:
-            break
-        for user in users:
-            user_id = getattr(user, "name", "") or ""
-            if user_id in seen:
-                continue
-            seen.add(user_id)
-            display_name = getattr(user, "displayName", "") or ""
-            info = parse_display_name(display_name)
-            info["display_name"] = display_name
-            info["user_id"] = user_id
-            results.append(info)
-        if len(users) < batch:
-            break
-        start += len(users)
+    for user in raw:
+        user_id = user.get("name") or user.get("key") or ""
+        display_name = user.get("displayName") or ""
+        dedup_key = user_id or display_name
+        if not dedup_key or dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        info = parse_display_name(display_name)
+        info["display_name"] = display_name
+        info["user_id"] = user_id
+        results.append(info)
     return results
 
 
@@ -267,6 +307,11 @@ def select_user_dialog(jira, parent=None, project_key: str = "REAVN") -> dict | 
                 return
             finally:
                 QApplication.restoreOverrideCursor()
+            if not results:
+                QMessageBox.information(
+                    self, "결과 없음",
+                    f'프로젝트 "{project_key}"에서 사용자를 찾지 못했습니다.')
+                return
             self.set_results(results)
 
         def set_results(self, results: list[dict]):
