@@ -73,10 +73,15 @@ function labelStep(): number {
   return [1, 2, 3, 4, 6, 8, 12, 24, 48].find(s => s >= need) ?? 48;
 }
 
+function fmtDay(ts: number): string {
+  const d = new Date(ts * 1000);
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
 // 기간 표기는 날짜만이 아니라 시각까지 — "언제부터 언제까지"가 정확히 보이게.
 function fmtDayTime(ts: number): string {
   const d = new Date(ts * 1000);
-  return `${d.getMonth() + 1}/${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return `${fmtDay(ts)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 function sum(c: Counts, keys: StateKey[] = STATE_ORDER): number {
@@ -123,6 +128,8 @@ export default function UsageStatsPage() {
   // 부서/프로젝트 필터 ('' = 전체) — 서버가 해당 PC 들만 집계해 내려준다
   const [teamFilter, setTeamFilter] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
+  // 시간대별 그래프의 대상 날짜 ('' = 기간 전체 평균, 그 외 = 그 날 0시 epoch 초)
+  const [hourlyDay, setHourlyDay] = useState('');
   const [meta, setMeta] = useState<AgentMeta[]>([]);
   const [view, setView] = useState({ start: 0, count: 160 });
   const timer = useRef<number | null>(null);
@@ -265,16 +272,47 @@ export default function UsageStatsPage() {
     setZoomSec(sec);
   };
 
+  // 시간대별 그래프에서 선택 가능한 날짜들 — 데이터가 있는 날만 (로컬 tz 기준 그 날 0시)
+  const dayOptions = useMemo(() => {
+    if (!data) return [] as number[];
+    const days = new Set<number>();
+    for (const b of data.buckets) {
+      if (b.ticks > 0) days.add(Math.floor((b.t + TZ_OFF) / 86400) * 86400 - TZ_OFF);
+    }
+    return Array.from(days).sort((x, y) => x - y);
+  }, [data]);
+
   const hourly: Bucket[] = useMemo(() => {
     if (!data) return [];
-    return data.hours.map(h => ({
+    let hrs: RawHour[];
+    let tipSuffix = '(기간 평균)';
+    if (hourlyDay) {
+      // 특정 날짜 — 서버의 hours 는 기간 전체 평균뿐이라, 원본 버킷을 그 날의
+      // 시(hour)별로 직접 재집계한다. 0~23시를 전부 채워 축이 흔들리지 않게 한다.
+      const day = Number(hourlyDay);
+      const acc: RawHour[] = Array.from({ length: 24 }, (_, hour) => ({ hour, ticks: 0, counts: {} }));
+      for (const b of data.buckets) {
+        if (b.t < day || b.t >= day + 86400) continue;
+        const h = acc[new Date(b.t * 1000).getHours()];
+        h.ticks += b.ticks;
+        for (const k of STATE_ORDER) {
+          const v = b.counts[k];
+          if (v) h.counts[k] = (h.counts[k] || 0) + v;
+        }
+      }
+      hrs = acc;
+      tipSuffix = `(${fmtDay(day)})`;
+    } else {
+      hrs = data.hours;
+    }
+    return hrs.map(h => ({
       key: String(h.hour),
       label: h.hour % 2 === 0 ? `${h.hour}시` : '',
-      tipTitle: `${pad2(h.hour)}:00 ~ ${pad2((h.hour + 1) % 24)}:00 (기간 평균)`,
+      tipTitle: `${pad2(h.hour)}:00 ~ ${pad2((h.hour + 1) % 24)}:00 ${tipSuffix}`,
       ticks: h.ticks,
       counts: h.counts,
     }));
-  }, [data]);
+  }, [data, hourlyDay]);
 
   // 기간 전체 합계 — 가동률/평균 대수 계산의 분모.
   const total = useMemo(() => {
@@ -333,21 +371,6 @@ export default function UsageStatsPage() {
       (a, b) => (b.v > (a?.v ?? 0) ? b : a), null);
     if (busiest && busiest.v > 0) {
       lines.push(`하루 중에는 ${busiest.hour}시대 사용이 가장 많습니다 (기간 평균 ${busiest.v.toFixed(1)}대 가동).`);
-    }
-
-    // PC 랭킹 — 가동률 1위 / 재생 시간 1위
-    const agents = data.agents || [];
-    const topUtil = agents.reduce<AgentTotals | null>(
-      (a, b) => (utilOf(b) > (a ? utilOf(a) : 0) ? b : a), null);
-    if (topUtil && utilOf(topUtil) > 0) {
-      lines.push(`가동률이 가장 높은 PC 는 ${topUtil.name} (${Math.round(utilOf(topUtil))}%) 입니다.`);
-    }
-    const playOf = (a: AgentTotals) => (a.counts.playing || 0) + (a.counts.paused || 0);
-    const topPlay = agents.reduce<AgentTotals | null>(
-      (a, b) => (playOf(b) > (a ? playOf(a) : 0) ? b : a), null);
-    if (topPlay && playOf(topPlay) > 0 && topPlay !== topUtil) {
-      lines.push(
-        `재생 시간이 가장 긴 PC 는 ${topPlay.name} (${hoursOf(playOf(topPlay), data.sample_interval_sec || 60)}) 입니다.`);
     }
     return lines;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -554,8 +577,23 @@ export default function UsageStatsPage() {
       </Card>
 
       <Card size="small" style={{ marginBottom: 16 }}
-        title={<span style={{ fontSize: 13 }}>시간대별 평균 (0~23시, 기간 전체를 하루로 접음)</span>}
-        extra={<Typography.Text type="secondary" style={{ fontSize: 11 }}>몇 시에 가장 많이 쓰는지</Typography.Text>}
+        title={
+          <span style={{ fontSize: 13 }}>
+            시간대별 평균 (0~23시{hourlyDay ? ` — ${fmtDay(Number(hourlyDay))} 하루` : ', 기간 전체를 하루로 접음'})
+          </span>
+        }
+        extra={
+          // 날짜별 보기 — '기간 전체' 는 전 기간을 하루로 접은 평균, 날짜 선택 시 그 날만
+          <Select
+            size="small" style={{ width: 110 }}
+            value={hourlyDay}
+            onChange={(v) => setHourlyDay(v)}
+            options={[
+              { label: '기간 전체', value: '' },
+              ...dayOptions.map(d => ({ label: fmtDay(d), value: String(d) })),
+            ]}
+          />
+        }
       >
         {hourly.length === 0 ? <Empty description="데이터 없음" /> : <StackedBars data={hourly} mode={mode} height={140} />}
       </Card>
