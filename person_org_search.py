@@ -50,22 +50,28 @@ def parse_display_name(display_name: str) -> dict:
     return result
 
 
-def search_users(jira, keyword: str, max_results: int = 200) -> list[dict]:
+def search_users(jira, keyword: str, max_results: int | None = None) -> list[dict]:
     """
     키워드로 Jira 사용자를 검색합니다.
     displayName에 조직명이 포함되므로 팀명(예: "검증자동화팀")으로도 검색 가능합니다.
+
+    max_results가 None이면 제한 없이 전체를 가져옵니다.
+    이름(displayName)이 없는 계정은 결과에서 제외합니다.
 
     반환: 사용자별 {"name", "title", "team", "display_name", "user_id"} dict 리스트
     """
     if not keyword or not keyword.strip():
         return []
 
-    users = jira.search_users(keyword.strip(), maxResults=max_results)
+    # maxResults=False → 페이지 단위로 전체 조회 (jira 라이브러리 동작)
+    users = jira.search_users(keyword.strip(), maxResults=max_results or False)
 
     results = []
     for user in users:
         display_name = getattr(user, "displayName", "") or ""
         info = parse_display_name(display_name)
+        if not info["name"]:  # 이름 없는 계정 제외
+            continue
         info["display_name"] = display_name
         info["user_id"] = getattr(user, "name", "") or ""  # Jira Server 계정 ID
         results.append(info)
@@ -157,6 +163,8 @@ def fetch_project_users(jira, project_key: str = "REAVN", batch: int = 1000) -> 
             continue
         seen.add(dedup_key)
         info = parse_display_name(display_name)
+        if not info["name"]:  # 이름 없는 계정 제외
+            continue
         info["display_name"] = display_name
         info["user_id"] = user_id
         results.append(info)
