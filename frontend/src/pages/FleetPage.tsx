@@ -80,17 +80,17 @@ interface Summary { total: number; online: number; playing: number; recording: n
 // 상태(색·라벨·순서) 정의는 lib/agentState.ts 한 곳 — 사용량 그래프와 공유한다.
 
 // ── 정렬 ──
-// 기본값은 **연결 순서 고정**(default) — 2초마다 폴링하므로 상태순으로 두면 카드가 계속
-// 자리를 옮겨 눈으로 따라가기 어렵다. 필요할 때만 상태순으로 바꿔 쓰도록 선택지로 둔다.
-type SortKey = 'default' | 'state' | 'name' | 'team' | 'project';
+// 상태순만 상태 변화에 따라 재정렬된다. 부서순/프로젝트순은 고정 속성(부서/프로젝트·이름)
+// 기준이라 2초 폴링으로 상태가 바뀌어도 카드가 자리를 옮기지 않고 그 자리에서 상태만 갱신된다.
+// (온라인↔오프라인 전환 시에만 활성/비활성 섹션 간 이동)
+type SortKey = 'state' | 'team' | 'project';
 const SORT_KEY = 'fleet_sort';
 const SORT_OPTIONS = [
-  { label: '연결순', value: 'default' },
   { label: '상태순', value: 'state' },
-  { label: '이름순', value: 'name' },
   { label: '부서순', value: 'team' },
   { label: '프로젝트순', value: 'project' },
 ];
+const SORT_KEYS: SortKey[] = ['state', 'team', 'project'];
 
 function agentName(a: Agent): string {
   return a.name || a.client_id;
@@ -110,11 +110,8 @@ function fitSelectWidth(options: string[], placeholder: string): number {
 }
 
 function sortAgents(list: Agent[], sort: SortKey): Agent[] {
-  if (sort === 'default') return list;   // 원본(연결 순서) 유지
   const arr = [...list];
-  if (sort === 'name') {
-    arr.sort((x, y) => agentName(x).localeCompare(agentName(y)));
-  } else if (sort === 'team') {
+  if (sort === 'team') {
     arr.sort((x, y) =>
       groupKey(x.user?.team).localeCompare(groupKey(y.user?.team)) ||
       agentName(x).localeCompare(agentName(y)));
@@ -280,8 +277,11 @@ export default function FleetPage() {
   const [summary, setSummary] = useState<Summary>({ total: 0, online: 0, playing: 0, recording: 0 });
   const [loaded, setLoaded] = useState(false);
   // 정렬 기준은 브라우저에 기억 — 관제 화면은 띄워 두고 쓰는 경우가 많다.
-  const [sort, setSort] = useState<SortKey>(
-    () => (localStorage.getItem(SORT_KEY) as SortKey) || 'default');
+  // (삭제된 옵션 '연결순'/'이름순' 이 저장돼 있으면 상태순으로 대체)
+  const [sort, setSort] = useState<SortKey>(() => {
+    const saved = localStorage.getItem(SORT_KEY) as SortKey;
+    return SORT_KEYS.includes(saved) ? saved : 'state';
+  });
   // 부서/프로젝트 필터 ('' = 전체) — 로그인 사용자 정보 기준
   const [teamFilter, setTeamFilter] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
@@ -539,7 +539,7 @@ export default function FleetPage() {
           options={projectOptions.map(p => ({ label: p, value: p }))}
           showSearch optionFilterProp="label"
         />
-        <Tooltip title="연결순 = 접속한 순서 고정(카드가 자리를 옮기지 않음) · 상태순 = 재생 중부터 위로 · 부서/프로젝트순 = 로그인 사용자 기준">
+        <Tooltip title="상태순 = 재생 중부터 위로(상태 변화 시 재정렬) · 부서/프로젝트순 = 로그인 사용자 기준 고정 배치(오프라인 전환 외에는 카드가 자리를 옮기지 않음)">
           <Segmented
             size="small"
             value={sort}
@@ -553,8 +553,8 @@ export default function FleetPage() {
         <Empty description={loaded ? '연결된 테스트 PC 없음 — ReplayKit 설정에서 관제 서버 URL 을 이 서버로 지정하세요' : '로딩 중...'} />
       ) : (
         <>
-          {/* 활성 / 비활성을 크게 나눠 표시. 섹션 내 순서는 정렬 선택(sort)을 따르고,
-              기본값 '연결순' 에서는 온라인/오프라인이 바뀌어도 카드가 자리를 옮기지 않는다. */}
+          {/* 활성 / 비활성을 크게 나눠 표시. 섹션 내 순서는 정렬 선택(sort)을 따른다.
+              부서/프로젝트순은 고정 속성 기준이라 상태가 바뀌어도 카드가 자리를 옮기지 않는다. */}
           <Typography.Title level={5} style={{ margin: '4px 0 8px' }}>
             <Badge status="success" /> 활성 <Typography.Text type="secondary">({onlineAgents.length})</Typography.Text>
           </Typography.Title>
