@@ -108,7 +108,7 @@ export default function BugReportsPage() {
           variant="borderless"
           value={v}
           onChange={(val) => changeStatus(r, val)}
-          style={{ width: 88 }}
+          style={{ width: 112 }}
           options={STATUS_OPTIONS.map((o) => ({
             value: o.value,
             label: <Tag color={o.color} style={{ marginRight: 0 }}>{o.label}</Tag>,
