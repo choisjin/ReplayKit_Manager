@@ -495,6 +495,7 @@ export default function UsageStatsPage() {
         {/* 부서/프로젝트 필터 — 해당 사용자가 로그인한 PC 들만 집계 (현재 값 기준) */}
         <Select
           style={{ minWidth: 140 }} allowClear
+          popupMatchSelectWidth={false}
           placeholder="부서 전체"
           value={teamFilter || undefined}
           onChange={(v) => setTeamFilter(v || '')}
@@ -503,6 +504,7 @@ export default function UsageStatsPage() {
         />
         <Select
           style={{ minWidth: 120 }} allowClear
+          popupMatchSelectWidth={false}
           placeholder="프로젝트 전체"
           value={projectFilter || undefined}
           onChange={(v) => setProjectFilter(v || '')}
