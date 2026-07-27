@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 
 import time
 
-from fastapi import FastAPI, File, Form, Query, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import (FastAPI, File, Form, Query, Request, UploadFile, WebSocket,
+                     WebSocketDisconnect, HTTPException)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
@@ -716,9 +717,19 @@ async def api_agent_delete(client_id: str):
 
 
 # ==================== 로그인(사용자 식별) 설정 ====================
-# ReplayKit 이 시작할 때 이 서버에서 Jira 계정을 받아 유저 검색(로그인)에 쓴다.
+# ReplayKit 로그인 화면의 유저 검색을 **이 서버가 대행**한다.
 # 계정 관리는 관리자 화면(설정 페이지)에서. 프로젝트/모델 목록은 여기서 내려주지
 # 않는다 — 각 ReplayKit 의 주 디바이스 카탈로그(device_catalog)가 원본이다.
+#
+# ⚠️ 2026-07-28 보안 변경 — Jira 비밀번호는 더 이상 에이전트로 나가지 않는다.
+#   예전에는 /api/login-config 가 {server,id,pw} 를 평문으로 내려주고 각 테스트 PC 가
+#   Jira 를 직접 호출했다. 인증 없는 엔드포인트라 사내망에서 curl 한 번이면 공용 Jira
+#   계정이 통째로 유출됐다. 이제 자격증명은 이 프로세스 밖으로 나가지 않고,
+#   검색만 대행한다:
+#     - 신버전 에이전트: GET /api/user-search?keyword=  (파싱된 결과)
+#     - 구버전 에이전트: GET /api/jira-proxy/rest/api/2/user/search  (Jira 호환 응답)
+#       — 배포된 바이너리를 고치지 않아도 login-config 의 server 가 이 프록시를
+#         가리키므로 기존 코드 경로가 그대로 동작한다.
 
 _LOGIN_DEFAULT_JIRA_SERVER = "http://vlm.lge.com/issue"
 _LOGIN_KEYS = ["jira_server", "jira_id", "jira_pw"]
@@ -765,16 +776,166 @@ async def api_put_login_settings(req: LoginSettingsUpdate):
     return await api_get_login_settings()
 
 
-@app.get("/api/login-config")
-async def api_login_config():
-    """ReplayKit 에이전트용 — 시작 시 받아가는 Jira 계정.
+# ---------- Jira 유저 검색 대행 ----------
+# 자격증명은 이 함수들 안에서만 쓰이고 응답에는 절대 포함되지 않는다.
 
-    ⚠️ Jira 비밀번호가 응답에 평문으로 포함된다 — 사내망 전용 서비스 전제.
-      (에이전트 백엔드만 호출하고 브라우저에는 노출하지 않는다)
+_JIRA_SEARCH_MAX = 500      # 에이전트에 돌려줄 최대 인원
+_JIRA_SEARCH_BATCH = 1000   # Jira 페이지 크기
+_JIRA_TIMEOUT = 15
+
+# 구버전 에이전트가 호환 프록시에 basic auth 로 붙을 때 쓰는 더미 자격증명.
+# 실제 Jira 계정과 무관하며 프록시는 이 값을 검증하지 않는다(값 자체에 의미 없음).
+# 에이전트 코드가 id/pw 가 비어 있으면 "계정 미설정" 으로 처리하기 때문에 채워 보낸다.
+_LEGACY_PROXY_ID = "replaykit-proxy"
+_LEGACY_PROXY_PW = "via-manager"
+
+
+def parse_display_name(display_name: str) -> dict:
+    """displayName → 이름/직급/팀. (person_org_search.parse_display_name 과 동일 규칙)
+
+    예: "최세진/(협력사) 선임연구원/VS TC설계/검증자동화팀(sejin3569.choi)"
+    """
+    result = {"name": "", "title": "", "team": ""}
+    if not display_name:
+        return result
+    parts = [p.strip() for p in display_name.split("/")]
+    result["name"] = parts[0]
+    if len(parts) >= 2:
+        result["title"] = parts[1]
+    if len(parts) >= 3:
+        # 세 번째 이후를 합쳐 팀으로 취급, '(' 뒤의 계정 ID 표기는 제거
+        result["team"] = "/".join(parts[2:]).split("(")[0].strip()
+    return result
+
+
+def _jira_search_page_sync(cfg: dict, keyword: str, start_at: int, batch: int) -> list:
+    """Jira user/search 한 페이지(원본 배열). 동기 호출이라 to_thread 로 감싸 쓴다."""
+    import requests
+
+    base = (cfg["jira_server"] or "").rstrip("/")
+    resp = requests.get(
+        f"{base}/rest/api/2/user/search",
+        params={"username": keyword, "startAt": start_at, "maxResults": batch},
+        auth=(cfg["jira_id"], cfg["jira_pw"]),
+        timeout=_JIRA_TIMEOUT,
+    )
+    if resp.status_code in (401, 403):
+        raise PermissionError("Jira 인증 실패 — 관제 서버 설정 페이지의 Jira 계정을 확인하세요.")
+    resp.raise_for_status()
+    page = resp.json()
+    return page if isinstance(page, list) else []
+
+
+async def _require_jira_cfg() -> dict:
+    cfg = await _load_login_settings()
+    if not (cfg["jira_server"] and cfg["jira_id"] and cfg["jira_pw"]):
+        raise HTTPException(
+            status_code=503,
+            detail="Jira 계정이 설정되지 않았습니다 — 관제 서버 설정 페이지에서 등록하세요.")
+    return cfg
+
+
+async def _jira_search_page(cfg: dict, keyword: str, start_at: int, batch: int) -> list:
+    try:
+        return await asyncio.to_thread(_jira_search_page_sync, cfg, keyword, start_at, batch)
+    except PermissionError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        logger.warning("Jira 유저 검색 실패(keyword=%r): %s", keyword, e)
+        raise HTTPException(status_code=502, detail=f"Jira 검색 실패: {e}")
+
+
+@app.get("/api/user-search")
+async def api_user_search(keyword: str = "", max_results: int = _JIRA_SEARCH_MAX):
+    """ReplayKit 로그인 화면의 유저 검색 — 이 서버가 Jira 를 대신 조회한다.
+
+    반환: {"users": [{"name","title","team","display_name","user_id"}, ...]}
+    이름 없는 계정은 제외하고, 계정 ID 기준으로 중복을 제거한다.
+    """
+    keyword = (keyword or "").strip()
+    if not keyword:
+        raise HTTPException(status_code=400, detail="검색어(keyword)를 입력하세요")
+    cap = max(1, min(int(max_results or _JIRA_SEARCH_MAX), _JIRA_SEARCH_MAX))
+
+    cfg = await _require_jira_cfg()
+    users: list[dict] = []
+    seen: set[str] = set()
+    start = 0
+    while len(users) < cap:
+        page = await _jira_search_page(cfg, keyword, start, _JIRA_SEARCH_BATCH)
+        if not page:
+            break
+        for u in page:
+            display_name = u.get("displayName") or ""
+            info = parse_display_name(display_name)
+            if not info["name"]:          # 이름 없는 계정 제외
+                continue
+            user_id = u.get("name") or u.get("key") or ""
+            dedup_key = user_id or display_name
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            info["display_name"] = display_name
+            info["user_id"] = user_id
+            users.append(info)
+        if len(page) < _JIRA_SEARCH_BATCH:
+            break
+        start += len(page)
+    return {"users": users[:cap]}
+
+
+@app.get("/api/jira-proxy/rest/api/2/user/search")
+async def api_jira_proxy_user_search(username: str = "", startAt: int = 0,
+                                     maxResults: int = _JIRA_SEARCH_BATCH):
+    """구버전 ReplayKit 호환 프록시 — Jira user/search 와 같은 모양으로 응답한다.
+
+    구버전 에이전트는 login-config 로 받은 {server}/rest/api/2/user/search 를 basic auth
+    로 직접 호출한다. login-config 가 server 를 이 경로로 가리키므로, **배포된 바이너리를
+    고치지 않아도** 실제 Jira 자격증명 없이 검색이 계속 동작한다.
+
+    - basic auth 헤더는 검증하지 않는다(더미값이다). 인증이 필요해지면 여기에 건다.
+    - 에이전트의 페이지네이션 종료 조건(len(page) < maxResults)이 깨지지 않도록
+      **원본 페이지와 같은 길이**로 돌려주고, 필드는 에이전트가 쓰는 것만 남긴다
+      (이메일/아바타 등 불필요한 개인정보를 흘리지 않는다).
+    """
+    username = (username or "").strip()
+    if not username:
+        return []
+    cfg = await _require_jira_cfg()
+    batch = max(1, min(int(maxResults or _JIRA_SEARCH_BATCH), _JIRA_SEARCH_BATCH))
+    page = await _jira_search_page(cfg, username, max(0, int(startAt or 0)), batch)
+    return [
+        {
+            "displayName": u.get("displayName") or "",
+            "name": u.get("name") or "",
+            "key": u.get("key") or "",
+        }
+        for u in page
+    ]
+
+
+@app.get("/api/login-config")
+async def api_login_config(request: Request):
+    """ReplayKit 에이전트용 로그인 구성.
+
+    ⚠️ **Jira 비밀번호는 내려주지 않는다** (2026-07-28 보안 변경). 검색은 이 서버가
+      대행하므로 에이전트는 자격증명을 가질 이유가 없다.
+        - 신버전 에이전트: search_url(/api/user-search) 을 호출한다.
+        - 구버전 에이전트: jira.server 가 호환 프록시를 가리키고 id/pw 는 더미라,
+          기존 코드가 그대로 이 서버를 거쳐 검색한다.
+      ready=false 면 id/pw 를 비워 보내 구버전이 "계정 미설정" 으로 처리하게 한다.
     """
     cfg = await _load_login_settings()
+    ready = bool(cfg["jira_server"] and cfg["jira_id"] and cfg["jira_pw"])
+    base = str(request.base_url).rstrip("/")
     return {
-        "jira": {"server": cfg["jira_server"], "id": cfg["jira_id"], "pw": cfg["jira_pw"]},
+        "jira": {
+            "server": f"{base}/api/jira-proxy",
+            "id": _LEGACY_PROXY_ID if ready else "",
+            "pw": _LEGACY_PROXY_PW if ready else "",
+        },
+        "search_url": f"{base}/api/user-search",
+        "ready": ready,
     }
 
 
@@ -1145,6 +1306,11 @@ if _FRONTEND_DIST.exists():
 
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str):
+        # /api/* 는 SPA 로 폴백시키지 않는다 — 없는 API 를 index.html + 200 으로 돌려주면
+        # 클라이언트가 "이 서버엔 그 API 가 없다(구버전)" 와 "정상 응답" 을 구분할 수 없다.
+        # (에이전트의 유저 검색이 이 때문에 오해할 수 있어 404 로 명확히 한다)
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
         file_path = _FRONTEND_DIST / full_path
         if file_path.exists() and file_path.is_file():
             return FileResponse(str(file_path))

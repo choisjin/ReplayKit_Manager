@@ -69,9 +69,9 @@ export default function SettingsPage() {
         loading={loading}
       >
         <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          각 테스트 PC(ReplayKit)가 시작할 때 이 계정을 받아 Jira 유저 검색(로그인 화면)에
-          사용합니다. 계정은 ReplayKit <b>백엔드에만</b> 전달되고 사용자 브라우저에는
-          노출되지 않습니다. 프로젝트/모델 선택지는 각 PC 의 주 디바이스 카탈로그를 따릅니다.
+          ReplayKit 로그인 화면의 유저 검색을 <b>이 서버가 대신 수행</b>할 때 쓰는 계정입니다.
+          계정은 <b>이 서버 밖으로 나가지 않습니다</b> — 테스트 PC 에는 검색 결과(이름/직급/팀/ID)만
+          전달됩니다. 프로젝트/모델 선택지는 각 PC 의 주 디바이스 카탈로그를 따릅니다.
         </Typography.Paragraph>
 
         <Form form={form} layout="vertical" requiredMark={false}>
