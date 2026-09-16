@@ -11,31 +11,13 @@ interface DeviceInfo {
   category?: string; type: string; status: string; raw_status?: string;
   test_only?: boolean;   // #test 모드에서만 UI 에 노출되는 실험 모듈
 }
-interface UiState { mode?: string; page?: string; }
-
-// UI 모드 — ReplayKit 의 URL hash 게이트. 모드마다 노출되는 모듈이 다르다.
-const MODE_LABEL: Record<string, string> = {
-  test: '#test', admin: '#admin', stats: '#stats', normal: '일반',
-};
-// 표에서는 태그 대신 **글자색**으로만 모드를 구분한다 (태그를 쓰면 행 높이가 커진다).
-// 색은 [라이트, 다크] 두 벌 — 한 색으로 맞추면 반드시 한쪽 테마에서 배경에 묻힌다.
+// 강조색은 [라이트, 다크] 두 벌 — 한 색으로 맞추면 반드시 한쪽 테마에서 배경에 묻힌다.
 type Duo = readonly [light: string, dark: string];
-const MODE_COLOR: Record<string, Duo> = {
-  test: ['#722ed1', '#b37feb'], admin: ['#d46b08', '#ffa940'],
-  stats: ['#08979c', '#36cfc9'], normal: ['', ''],
-};
-// 프로젝트/OS 강조색도 같은 규칙.
 const ACCENT: Record<string, Duo> = {
   project: ['#1677ff', '#4096ff'],
   Linux: ['#ad6800', '#d89614'],
   Windows: ['#2f54eb', '#597ef7'],
 };
-// 현재 보고 있는 페이지 (App.tsx 의 activeKey)
-const PAGE_LABEL: Record<string, string> = {
-  '/': '디바이스', '/record': '녹화', '/scenarios': '시나리오', '/results': '결과',
-  '/settings': '설정', '/changelog': '변경이력', '/admin': '관리자', '/stats': '통계',
-};
-
 /** 디바이스 표시명.
  *  - auxiliary(모듈·시리얼): 연결된 **모듈명**(CMD·SHELL·OCR·Frame_Check…).
  *    Common/OCR/Frame_Check 는 name 이 전부 "Common" 이라 구분이 안 되기 때문.
@@ -83,7 +65,6 @@ interface Agent {
   connected_device_count: number;
   playback: Playback | null;
   scenario_count: number;
-  ui?: UiState;
   user?: AgentUser | null;
 }
 interface Summary { total: number; online: number; playing: number; recording: number; }
@@ -258,18 +239,6 @@ function userTooltip(a: Agent) {
   );
 }
 
-function modeTooltip(a: Agent) {
-  const mode = a.ui?.mode || '';
-  const page = a.ui?.page || '';
-  return (
-    <div style={{ fontSize: 11, lineHeight: 1.7 }}>
-      <div>모드 <b>{MODE_LABEL[mode] || mode}</b></div>
-      {page && <div>화면 {PAGE_LABEL[page] || page}</div>}
-      {mode === 'test' && <div style={{ opacity: 0.8 }}>#test — 실험 모듈이 추가로 노출됨</div>}
-    </div>
-  );
-}
-
 /** 재생 진행률(0~100) + 총량을 아는지 여부.
  *
  *  ⚠️ 회차만으로 계산하면 안 된다 — current_cycle 은 1-based 라 1회 재생(1/1)은 시작하자마자
@@ -368,7 +337,7 @@ function StateCell({ st }: { st: StateKey }) {
  * 그 자리에서 '오프라인' 으로 흐려질 뿐이다. (상태순을 고른 경우에만 상태 변화로 재정렬)
  */
 export default function FleetPage() {
-  // 강조색 인덱스 — 0=라이트, 1=다크 (MODE_COLOR/ACCENT 의 [라이트, 다크] 중 고를 쪽)
+  // 강조색 인덱스 — 0=라이트, 1=다크 (ACCENT 의 [라이트, 다크] 중 고를 쪽)
   const { token } = theme.useToken();
   const ci = isDarkBg(token.colorBgContainer) ? 1 : 0;
 
@@ -591,18 +560,6 @@ export default function FleetPage() {
       ),
     },
     {
-      title: '모드', key: 'mode', width: 62, align: 'center',
-      render: (_: unknown, a: Agent) => (a.online && a.ui?.mode
-        ? (
-          <Tooltip title={modeTooltip(a)}>
-            <span style={{ cursor: 'default', color: MODE_COLOR[a.ui.mode]?.[ci] || undefined }}>
-              {MODE_LABEL[a.ui.mode] || a.ui.mode}
-            </span>
-          </Tooltip>
-        )
-        : DASH),
-    },
-    {
       title: '시나리오', key: 'scenario', width: 200, ellipsis: true,
       render: (_: unknown, a: Agent) => (
         <Tooltip title={playbackTooltip(a)}>
@@ -772,7 +729,7 @@ export default function FleetPage() {
           pagination={false}
           // y 를 주면 헤더 행이 표 안에 고정되고 본문만 스크롤된다 (엑셀 '틀 고정').
           // 창 스크롤에 기대는 sticky 와 달리 요약/범례까지 늘 화면에 남는다.
-          scroll={{ x: 1577, y: bodyHeight }}
+          scroll={{ x: 1515, y: bodyHeight }}
           // 상태 틴트는 CSS 변수로 넘긴다 (활동 중인 PC 가 대기/오프라인보다 튀어 보이게).
           // 오프라인 행은 fleet-off 로 흐려질 뿐 **자리는 그대로** 둔다.
           onRow={(a) => {
