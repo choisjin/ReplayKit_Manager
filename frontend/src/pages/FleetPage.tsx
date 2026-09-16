@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Col, Empty, Modal, Progress, Row, Segmented, Select, Statistic, Table, Tag, theme, Tooltip, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { DeleteOutlined, DesktopOutlined, PlayCircleOutlined, UserOutlined, VideoCameraOutlined } from '@ant-design/icons';
+import { DeleteOutlined, DesktopOutlined, PlayCircleOutlined, SortAscendingOutlined, UserOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import { agentApi } from '../services/api';
 import { STATE, StateKey, stateOf, tint } from '../lib/agentState';
 import { StateLegend } from '../components/StackedBars';
@@ -92,18 +92,22 @@ interface Summary { total: number; online: number; playing: number; recording: n
 
 // ── 정렬 ──
 // 관제 표는 **행 위치가 흔들리지 않는 것**이 가장 중요하다 — 2초 폴링마다 행이 자리를 옮기면
-// 보고 있던 PC 를 매번 다시 찾아야 한다. 그래서 기본은 고정 속성(이름/부서/프로젝트) 기준이고,
-// 접속이 끊겨도 행을 빼거나 아래로 내리지 않고 **그 자리에서 상태만 '오프라인' 으로 바뀐다**.
-// 상태순만 예외적으로 상태 변화에 따라 재정렬된다(지금 돌고 있는 것부터 보고 싶을 때).
-type SortKey = 'name' | 'team' | 'project' | 'state';
-const SORT_KEY = 'fleet_sort';
+// 보고 있던 PC 를 매번 다시 찾아야 한다. 그래서 어떤 정렬을 골라도 행은 제자리에 있고
+// 접속이 끊겨도 목록에서 빠지지 않는다 — **상태만 '오프라인' 으로 바뀐다**.
+// 부서/프로젝트/사용자/PC 이름은 고정 속성이라 그대로 정렬해도 자리가 안 바뀌고,
+// 상태순은 '고른 순간의 상태' 로 한 번 줄을 세우고 얼린다(다시 세우려면 '재정렬').
+type SortKey = 'team' | 'project' | 'name' | 'state';
+// v3 — 기본 정렬이 '부서 → 프로젝트 → 사용자이름' 으로 바뀌었다. 예전 키에 저장된 선택을
+// 물려받으면 기본값이 적용되지 않으므로 키를 올려 처음부터 다시 시작한다.
+const SORT_KEY = 'fleet_sort_v3';
+const DEFAULT_SORT: SortKey = 'team';
 const SORT_OPTIONS = [
+  { label: '부서순', value: 'team' },        // 부서 → 프로젝트 → 사용자이름 (기본)
+  { label: '프로젝트순', value: 'project' },  // 프로젝트 → 부서 → 사용자이름
   { label: 'PC 이름순', value: 'name' },
-  { label: '부서순', value: 'team' },
-  { label: '프로젝트순', value: 'project' },
-  { label: '상태순', value: 'state' },
+  { label: '상태순', value: 'state' },       // 고른 순간 기준으로 한 번만 정렬 (이후 고정)
 ];
-const SORT_KEYS: SortKey[] = ['name', 'team', 'project', 'state'];
+const SORT_KEYS: SortKey[] = ['team', 'project', 'name', 'state'];
 
 /** antd 다크 알고리즘이 켜져 있는지 — ConfigProvider 에 직접 묻는 API 가 없어
  *  컨테이너 배경색의 밝기로 판단한다. (라이트 #ffffff / 다크 #141414) */
@@ -118,9 +122,15 @@ function agentName(a: Agent): string {
   return a.name || a.client_id;
 }
 
-/** 부서/프로젝트 정렬 키 — 값이 없으면(미로그인) 맨 뒤로 보낸다. */
+/** 부서/프로젝트/사용자 정렬 키 — 값이 없으면(미로그인) 맨 뒤로 보낸다. */
 function groupKey(v: string | undefined): string {
   return v ? `0${v}` : '1';
+}
+
+/** 최종 tie-break — 같은 부서·프로젝트·사용자라도 순서가 흔들리면 안 되므로
+ *  마지막엔 항상 PC 이름(없으면 머신 UID)으로 못박는다. */
+function tieBreak(x: Agent, y: Agent): number {
+  return agentName(x).localeCompare(agentName(y));
 }
 
 /** 필터 Select 를 내용(가장 긴 옵션/placeholder)에 맞춰 폭 계산.
@@ -134,13 +144,20 @@ function fitSelectWidth(options: string[], placeholder: string): number {
 function sortAgents(list: Agent[], sort: SortKey): Agent[] {
   const arr = [...list];
   if (sort === 'team') {
+    // 기본 정렬 — 부서 → 프로젝트 → 사용자이름. 같은 팀 사람들이 붙어 보이고,
+    // 그 안에서 프로젝트별로 묶이며, 마지막으로 담당자 이름순.
     arr.sort((x, y) =>
       groupKey(x.user?.team).localeCompare(groupKey(y.user?.team)) ||
-      agentName(x).localeCompare(agentName(y)));
+      groupKey(x.user?.project).localeCompare(groupKey(y.user?.project)) ||
+      groupKey(x.user?.name).localeCompare(groupKey(y.user?.name)) ||
+      tieBreak(x, y));
   } else if (sort === 'project') {
+    // 프로젝트 우선 — 그다음은 기본 정렬과 같은 순서(부서 → 사용자이름).
     arr.sort((x, y) =>
       groupKey(x.user?.project).localeCompare(groupKey(y.user?.project)) ||
-      agentName(x).localeCompare(agentName(y)));
+      groupKey(x.user?.team).localeCompare(groupKey(y.user?.team)) ||
+      groupKey(x.user?.name).localeCompare(groupKey(y.user?.name)) ||
+      tieBreak(x, y));
   } else if (sort === 'state') {
     // 상태가 같으면 이름순 — 같은 상태 안에서는 순서가 흔들리지 않는다.
     arr.sort((x, y) =>
@@ -349,20 +366,37 @@ export default function FleetPage() {
   const [summary, setSummary] = useState<Summary>({ total: 0, online: 0, playing: 0, recording: 0 });
   const [loaded, setLoaded] = useState(false);
   // 정렬 기준은 브라우저에 기억 — 관제 화면은 띄워 두고 쓰는 경우가 많다.
-  // (없거나 옛 옵션이 저장돼 있으면 자리 이동이 없는 PC 이름순으로 대체)
+  // (저장된 값이 없으면 기본 정렬: 부서 → 프로젝트 → 사용자이름)
   const [sort, setSort] = useState<SortKey>(() => {
     const saved = localStorage.getItem(SORT_KEY) as SortKey;
-    return SORT_KEYS.includes(saved) ? saved : 'name';
+    return SORT_KEYS.includes(saved) ? saved : DEFAULT_SORT;
   });
   // 부서/프로젝트 필터 ('' = 전체) — 로그인 사용자 정보 기준
   const [teamFilter, setTeamFilter] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
   const timer = useRef<number | null>(null);
 
+  // 상태순으로 한 번 세운 순서(client_id 목록)를 얼려 둔다. null = 아직 안 세움.
+  // 이게 없으면 2초 폴링마다 상태로 다시 정렬돼 재생이 끝날 때마다 행이 위아래로 튄다.
+  const [frozen, setFrozen] = useState<string[] | null>(null);
+  // 정렬 시점의 목록이 필요해 ref 로 최신 agents 를 들고 있는다 (effect 의존성에 안 넣으려고)
+  const agentsRef = useRef<Agent[]>([]);
+  agentsRef.current = agents;
+
+  const freezeByState = () =>
+    setFrozen(sortAgents(agentsRef.current, 'state').map(a => a.client_id));
+
   const changeSort = (v: SortKey) => {
     setSort(v);
     localStorage.setItem(SORT_KEY, v);
+    // 상태순을 고를 때만 그 순간의 상태로 줄을 세운다. 다른 정렬로 나가면 버린다.
+    setFrozen(v === 'state' ? sortAgents(agentsRef.current, 'state').map(a => a.client_id) : null);
   };
+
+  // 저장된 선택이 상태순인 채로 화면에 들어온 경우 — 첫 데이터가 도착하면 한 번 세운다.
+  useEffect(() => {
+    if (sort === 'state' && frozen === null && agents.length > 0) freezeByState();
+  }, [sort, frozen, agents]);
 
   const load = async () => {
     try {
@@ -414,15 +448,23 @@ export default function FleetPage() {
     () => Array.from(new Set(agents.map(a => a.user?.project).filter(Boolean) as string[])).sort(),
     [agents]);
 
-  // 2초 폴링마다 재정렬되므로 memo — agents/sort/필터가 바뀔 때만 계산한다.
-  // 온라인/오프라인으로 나누지 않는다 — 한 표 안에서 정렬 기준대로만 줄을 세운다.
-  const rows = useMemo(
-    () => sortAgents(
-      agents.filter(a =>
-        (!teamFilter || a.user?.team === teamFilter) &&
-        (!projectFilter || a.user?.project === projectFilter)),
-      sort),
-    [agents, teamFilter, projectFilter, sort]);
+  // 2초 폴링마다 다시 계산되므로 memo. 온라인/오프라인으로 나누지 않는다 —
+  // 한 표 안에서 정렬 기준대로만 줄을 세우고, 접속이 끊겨도 행은 그 자리에 남는다.
+  const rows = useMemo(() => {
+    const filtered = agents.filter(a =>
+      (!teamFilter || a.user?.team === teamFilter) &&
+      (!projectFilter || a.user?.project === projectFilter));
+    if (sort === 'state' && frozen) {
+      // 얼린 순서대로. 그 사이 새로 등록된 PC 는 맨 뒤에 이름순으로 붙는다
+      // (중간에 끼워 넣으면 보고 있던 행들이 밀려 내려간다).
+      const pos = new Map(frozen.map((id, i) => [id, i]));
+      const END = Number.MAX_SAFE_INTEGER;
+      return [...filtered].sort((x, y) =>
+        (pos.get(x.client_id) ?? END) - (pos.get(y.client_id) ?? END) ||
+        agentName(x).localeCompare(agentName(y)));
+    }
+    return sortAgents(filtered, sort);
+  }, [agents, teamFilter, projectFilter, sort, frozen]);
 
   const onlineCount = useMemo(() => rows.filter(a => a.online).length, [rows]);
 
@@ -609,7 +651,8 @@ export default function FleetPage() {
       </Typography.Title>
       <Typography.Paragraph type="secondary">
         각 테스트 PC 가 관제 서버(이 서버)로 보고한 실시간 재생 상태입니다. PC 식별은 하드웨어 머신 UID 기준이며,
-        표시된 IP 는 참고용입니다. (2초마다 자동 갱신 · 접속이 끊겨도 행은 자리를 지키고 상태만 '오프라인' 으로 바뀝니다)
+        표시된 IP 는 참고용입니다. (2초마다 자동 갱신 · 한 번 등록된 PC 는 목록에서 사라지지 않고,
+        접속이 끊겨도 행은 자리를 지킨 채 상태만 '오프라인' 으로 바뀝니다)
       </Typography.Paragraph>
 
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
@@ -647,7 +690,7 @@ export default function FleetPage() {
           options={projectOptions.map(p => ({ label: p, value: p }))}
           showSearch optionFilterProp="label"
         />
-        <Tooltip title="PC 이름/부서/프로젝트순 = 고정 배치(상태가 바뀌거나 접속이 끊겨도 행이 자리를 옮기지 않음) · 상태순 = 재생 중부터 위로(상태 변화 시 재정렬)">
+        <Tooltip title="부서순(기본) = 부서 → 프로젝트 → 사용자이름 · 프로젝트순 = 프로젝트 → 부서 → 사용자이름. 어느 쪽을 골라도 행은 자리를 지킵니다 — 상태가 바뀌거나 접속이 끊겨도 목록에서 빠지지 않고 상태 칸만 바뀝니다. 상태순은 '고른 순간' 의 상태로 한 번만 줄을 세웁니다.">
           <Segmented
             size="small"
             value={sort}
@@ -655,6 +698,14 @@ export default function FleetPage() {
             options={SORT_OPTIONS}
           />
         </Tooltip>
+        {/* 상태순은 얼린 순서라 스스로 갱신되지 않는다 — 다시 세우고 싶을 때만 누른다 */}
+        {sort === 'state' && (
+          <Tooltip title="지금 상태 기준으로 줄을 다시 세웁니다 (누르기 전까지는 행 위치가 고정)">
+            <Button size="small" icon={<SortAscendingOutlined />} onClick={freezeByState}>
+              재정렬
+            </Button>
+          </Tooltip>
+        )}
       </div>
 
       {rows.length === 0 ? (

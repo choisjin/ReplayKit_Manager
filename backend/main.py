@@ -90,6 +90,24 @@ def _maybe_open_browser():
 async def lifespan(app: FastAPI):
     db.init_db()
     logger.info("Admin server started — DB initialized")
+    # 관제 명부 복원 — 라이브 상태는 메모리라 재시작하면 비지만, 한 번 등록된 PC 는
+    # 목록에서 사라지면 안 된다(행이 사라졌다 나타나면 관제 화면이 출렁인다).
+    # 명부로 미리 채워 '오프라인' 으로 띄우고, 재접속하면 그 행이 그대로 살아난다.
+    try:
+        roster = await db.list_agent_registry()
+        metas = await db.list_agent_meta()
+        users = {
+            m["client_id"]: {
+                "name": m["user_name"], "title": m["user_title"],
+                "team": m["user_team"], "project": m["project"],
+            }
+            for m in metas if m.get("user_name")
+        }
+        agents.registry.seed(roster, users)
+        if roster:
+            logger.info("관제 명부 복원: %d대 (오프라인 상태로 시작)", len(roster))
+    except Exception as e:
+        logger.warning("관제 명부 복원 실패: %s", e)
     _maybe_open_browser()
     # 이전 실행에서 닫히지 않고 남은 열린 상태 구간 정리(크래시/재시작 잔재).
     try:
@@ -422,6 +440,12 @@ async def _state_sampler():
     while True:
         try:
             await asyncio.sleep(SAMPLE_INTERVAL_SEC)
+            # 온라인 PC 의 마지막 보고 시각을 명부에 반영 — 재시작 후 '최근 보고' 가
+            # 기동 시각으로 리셋되지 않게. (status_update 마다 쓰면 2초 × 대수만큼 write)
+            try:
+                await db.touch_agent_registry(agents.registry.last_seen_pairs())
+            except Exception as e:
+                logger.warning("관제 명부 갱신 실패: %s", e)
             rows = agents.registry.sample_states()
             if rows:
                 # tick 시각은 주기에 맞춰 내림 — 버킷 경계가 깔끔하고 재시작해도 격자가 유지된다.
@@ -706,6 +730,7 @@ async def api_agent_delete(client_id: str):
     라이브 상태와 저장된 함수통계 스냅샷을 함께 지운다.
     """
     removed = agents.registry.remove(client_id)
+    await db.delete_agent_registry(client_id)           # 명부에서도 빼야 재기동 때 안 살아난다
     await db.delete_agent_usage(client_id)
     await db.delete_state_samples(client_id=client_id)   # 사용량 그래프에서도 사라지게
     await db.delete_state_intervals(client_id)           # 구간 이력도 함께
@@ -965,6 +990,11 @@ async def ws_client(ws: WebSocket):
             ip=ip,
             version=data.get("version", ""),
         )
+        # 명부에 남긴다 — 이후 서버가 재시작돼도 이 PC 의 행은 관제 표에서 사라지지 않는다.
+        try:
+            await db.upsert_agent_registry(client_id, data.get("name", ""), ip, data.get("version", ""))
+        except Exception as e:
+            logger.warning("관제 명부 등록 실패(%s): %s", client_id, e)
         await ws.send_json({"type": "registered", "server": "replaykit-manager"})
         logger.info("에이전트 등록: %s (%s / %s)", client_id, data.get("name", ""), ip)
 

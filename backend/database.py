@@ -43,6 +43,22 @@ def init_db():
             updated_at TEXT NOT NULL      -- 서버 저장 시각
         );
 
+        -- 관제 명부 — **한 번 접속한 PC 는 여기 남는다**.
+        -- 라이브 상태(AgentRegistry)는 메모리라 서버가 재시작되면 전부 비는데, 그러면 관제 표에서
+        -- 행이 통째로 사라졌다가 그 PC 가 다시 접속할 때 되살아난다(= 목록이 출렁인다).
+        -- 그래서 등록 사실 자체는 여기 영속화하고, 기동 시 이 명부로 레지스트리를 채운다
+        -- (상태는 '오프라인' 으로 시작 — 행은 유지되고 상태만 바뀐다).
+        -- 지우는 건 관제 화면의 명시적 '제거' 뿐.
+        CREATE TABLE IF NOT EXISTS agent_registry (
+            client_id TEXT PRIMARY KEY,   -- 머신 UID
+            seq INTEGER NOT NULL,         -- 최초 등록 순번 (표 정렬을 재시작 후에도 고정)
+            name TEXT,                    -- 호스트명
+            ip TEXT,
+            version TEXT,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        );
+
         -- PC별 상태 시계열 샘플 (사용량 통계 그래프의 원본).
         -- 라이브 상태는 메모리에만 있어 서버가 죽으면 사라지므로, SAMPLE_INTERVAL_SEC 마다
         -- 전 PC 의 상태를 한 tick 으로 찍어 여기 남긴다. 그래프는 이걸 시간 버킷으로 집계.
@@ -313,6 +329,72 @@ async def list_agent_meta() -> list[dict]:
              "user_team": r["user_team"] or "", "project": r["project"] or ""}
             for r in rows
         ]
+    return await asyncio.to_thread(_run)
+
+
+# ---- 관제 명부 (agent_registry) ----
+
+async def upsert_agent_registry(client_id: str, name: str, ip: str, version: str) -> None:
+    """PC 접속 시 명부에 등록(있으면 표시값만 갱신).
+
+    seq 는 **최초 등록 때만** 정해지고 이후 바뀌지 않는다 — 재시작이나 재접속으로
+    관제 표의 행 순서가 뒤바뀌지 않게 하는 기준값이다.
+    """
+    def _run():
+        conn = get_conn()
+        now = _now()
+        conn.execute(
+            "INSERT INTO agent_registry (client_id, seq, name, ip, version, first_seen, last_seen) "
+            "VALUES (?, COALESCE((SELECT seq FROM agent_registry WHERE client_id=?), "
+            "                    (SELECT IFNULL(MAX(seq), 0) + 1 FROM agent_registry)), ?, ?, ?, ?, ?) "
+            "ON CONFLICT(client_id) DO UPDATE SET "
+            "name=excluded.name, ip=excluded.ip, version=excluded.version, last_seen=excluded.last_seen",
+            (client_id, client_id, name, ip, version, now, now),
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_run)
+
+
+async def touch_agent_registry(rows: list[tuple[str, str]]) -> None:
+    """(client_id, last_seen) 묶음 갱신 — 마지막 보고 시각을 주기적으로 한 번에 저장.
+
+    status_update 마다 쓰면 2초 × PC 수만큼 write 가 나므로 호출부에서 주기를 잡는다.
+    """
+    if not rows:
+        return
+    def _run():
+        conn = get_conn()
+        conn.executemany(
+            "UPDATE agent_registry SET last_seen=? WHERE client_id=?",
+            [(seen, cid) for cid, seen in rows],
+        )
+        conn.commit()
+        conn.close()
+    await asyncio.to_thread(_run)
+
+
+async def list_agent_registry() -> list[dict]:
+    """명부 전체를 최초 등록 순번(seq)으로 반환 — 기동 시 레지스트리 시드용."""
+    def _run():
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT client_id, seq, name, ip, version, first_seen, last_seen "
+            "FROM agent_registry ORDER BY seq"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    return await asyncio.to_thread(_run)
+
+
+async def delete_agent_registry(client_id: str) -> bool:
+    """명부에서 제거 — 관제 화면의 '제거' 에서만 호출된다."""
+    def _run():
+        conn = get_conn()
+        cur = conn.execute("DELETE FROM agent_registry WHERE client_id=?", (client_id,))
+        conn.commit()
+        conn.close()
+        return cur.rowcount > 0
     return await asyncio.to_thread(_run)
 
 

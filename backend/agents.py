@@ -91,6 +91,42 @@ class AgentRegistry:
             self._agents[client_id] = st
         return st
 
+    # ---- 시드 ----
+
+    def seed(self, rows: list[dict], users: dict[str, dict] | None = None) -> None:
+        """DB 명부(agent_registry)로 레지스트리를 채운다 — 서버 기동 시 1회.
+
+        라이브 상태는 메모리에만 있어 재시작하면 전부 사라지는데, 그대로 두면 관제 표에서
+        행이 통째로 없어졌다가 그 PC 가 다시 접속할 때 되살아난다. 명부로 미리 채워 두면
+        **행은 그 자리에 있고 상태만 '오프라인'** 으로 보인다.
+
+        연결 정보(디바이스·재생 상태)는 복원하지 않는다 — 실제로 모르는 값이라
+        오프라인으로 두는 게 맞다. 첫 status_update 가 오면 그대로 채워진다.
+        users: client_id → 로그인 사용자(DB 스냅샷). 재시작 후에도 부서/프로젝트 필터가 살아있게.
+        """
+        for r in rows:
+            cid = r.get("client_id") or ""
+            if not cid or cid in self._agents:
+                continue
+            seq = int(r.get("seq") or 0)
+            self._agents[cid] = {
+                "client_id": cid,
+                "seq": seq,
+                "name": r.get("name") or "",
+                "ip": r.get("ip") or "",
+                "version": r.get("version") or "",
+                "connected": False,
+                "last_seen": r.get("last_seen") or "",
+                "registered_at": r.get("first_seen") or "",
+                "activity": "idle",
+                "devices": [],
+                "playback": None,
+                "scenario_count": 0,
+                "ui": {},
+                "user": (users or {}).get(cid),
+            }
+            self._seq = max(self._seq, seq)
+
     # ---- 갱신 ----
 
     def register(self, client_id: str, *, name: str, ip: str, version: str) -> None:
@@ -194,8 +230,9 @@ class AgentRegistry:
     def get_all(self) -> list[dict]:
         """전체 에이전트를 **연결 순서(seq)** 로 반환한다.
 
-        온라인 여부로 정렬하면 PC 가 접속/해제될 때마다 카드가 튀어 보기 어렵다.
-        활성/비활성 구분은 프론트가 섹션으로 나눠 표시하고, 각 섹션 내 순서는 이 seq 를 따른다.
+        온라인 여부로 정렬하면 PC 가 접속/해제될 때마다 행이 튀어 보기 어렵다.
+        한 번 등록된 PC 는 명시적으로 제거하기 전까지 오프라인이어도 목록에 남는다
+        (기동 시 DB 명부로 seed — seq 는 최초 등록 순번이라 재시작해도 순서가 같다).
         """
         views = [self._public_view(st) for st in self._agents.values()]
         views.sort(key=lambda v: v.get("seq") or 0)
@@ -227,6 +264,17 @@ class AgentRegistry:
                 state = derive_online_state(st.get("activity", "idle"), st.get("playback"))
             out.append((cid, state))
         return out
+
+    def last_seen_pairs(self) -> list[tuple[str, str]]:
+        """온라인 PC 의 (client_id, last_seen) — 명부의 마지막 보고 시각 갱신용.
+
+        오프라인 PC 는 보고가 없으니 건드리지 않는다(마지막으로 살아있던 시각이 남아야 한다).
+        """
+        return [
+            (st.get("client_id") or "", st.get("last_seen") or "")
+            for st in self._agents.values()
+            if st.get("client_id") and st.get("last_seen") and self._is_online(st)
+        ]
 
     def names(self) -> dict[str, str]:
         """client_id → 호스트명 (그래프의 PC별 표시용)."""
