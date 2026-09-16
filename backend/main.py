@@ -380,9 +380,13 @@ _last_user_json: dict[str, str] = {}
 _open_state: dict[str, str] = {}
 
 
-async def _log_state_transition(client_id: str, activity: str, playback) -> None:
-    """status_update 마다 호출 — 상태가 바뀌었을 때만 구간 전이를 DB 에 기록."""
-    state = agents.derive_online_state(activity, playback)
+async def _log_state_transition(client_id: str) -> None:
+    """status_update 마다 호출 — 상태가 바뀌었을 때만 구간 전이를 DB 에 기록.
+
+    상태는 레지스트리에 **저장된** 값으로 판정한다(registry.live_state). 방금 받은 메시지에서
+    바로 뽑으면, 필드가 빠진 tick 이 '대기' 로 잡혀 사용량 그래프에 없던 대기 구간이 생긴다.
+    """
+    state = agents.registry.live_state(client_id)
     if _open_state.get(client_id) == state:
         return  # 상태 유지 → write 없음
     _open_state[client_id] = state
@@ -972,6 +976,8 @@ async def ws_client(ws: WebSocket):
       1. {type:"register", client_id(머신 UID), name(호스트명), version}
          ← 서버: {type:"registered"}
       2. {type:"status_update", activity, devices[], playback{...}, scenarios[], usage_stats{...}}
+         ⚠️ 일부 필드는 빠진 채로 올 수 있다(대역폭 절감). **없는 키 = 변경 없음** 이므로
+            기본값으로 덮지 말고 마지막 값을 유지한다(registry.update_status 참고).
     """
     await ws.accept()
     ip = ws.client.host if ws.client else ""
@@ -1008,7 +1014,7 @@ async def ws_client(ws: WebSocket):
             if msg.get("type") == "status_update":
                 agents.registry.update_status(client_id, msg, ip)
                 # 전이 기반 구간 기록 — 상태가 바뀐 순간에만 1행. (샘플러와 병행)
-                await _log_state_transition(client_id, msg.get("activity", "idle"), msg.get("playback"))
+                await _log_state_transition(client_id)
                 # 로그인 사용자 영속화 — 값이 바뀔 때만 저장(오프라인 후에도 부서/프로젝트 필터에 쓰인다)
                 u = msg.get("user")
                 if isinstance(u, dict) and u:

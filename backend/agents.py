@@ -150,10 +150,20 @@ class AgentRegistry:
             st["ip"] = ip
         st["connected"] = True
         st["last_seen"] = _now_iso()
-        st["activity"] = msg.get("activity", "idle")
-        st["devices"] = msg.get("devices", []) or []
-        st["playback"] = msg.get("playback")  # None 이면 재생 안 함
-        st["scenario_count"] = len(msg.get("scenarios", []) or [])
+        # 아래 네 값은 **키가 있을 때만** 반영한다.
+        # 에이전트는 일부 필드를 빼고 보내기도 하는데(usage_stats 와 같은 대역폭 절감),
+        # 없는 키를 기본값으로 덮어쓰면 재생 중이던 PC 가 그 tick 에 activity="idle" /
+        # playback=None 이 되어 관제 표에서 '재생 중' ↔ '대기' 를 오간다.
+        # 반대로 **명시적으로 온 값은 그대로 믿는다** — 재생이 끝나면 activity="idle" 이
+        # 와야 대기로 바뀌어야 하기 때문(그건 진짜 상태 변화다).
+        if "activity" in msg:
+            st["activity"] = msg.get("activity") or "idle"
+        if "playback" in msg:
+            st["playback"] = msg.get("playback")   # None 이면 재생 안 함
+        if "devices" in msg:
+            st["devices"] = msg.get("devices") or []
+        if "scenarios" in msg:
+            st["scenario_count"] = len(msg.get("scenarios") or [])
         # 현재 UI 모드(#test/#admin/#stats/normal)와 페이지.
         # 비어 오는 보고는 무시하고 마지막 값을 유지한다(_keep_last) — 매 tick 깜빡이면 못 읽는다.
         self._keep_last(st, "ui", msg.get("ui") or {})
@@ -166,6 +176,19 @@ class AgentRegistry:
         # 비어 왔다고 지우지 않는다 — 부서/프로젝트가 정렬 키라서, 한 tick 빠지는 것만으로
         # 행이 미로그인 그룹으로 내려갔다 올라온다(_keep_last 참고).
         self._keep_last(st, "user", msg.get("user") or None)
+
+    def live_state(self, client_id: str) -> str:
+        """지금 이 PC 의 상태(StateKey) — 관제 표·사용량 그래프가 같은 값을 쓰도록 한 곳에서 낸다.
+
+        레지스트리에 **저장된** activity/playback 으로 판정한다. 방금 도착한 메시지를 직접
+        보면 안 된다 — 필드가 빠진 tick 이 '대기' 로 기록돼 그래프에 없는 대기 구간이 생긴다.
+        """
+        st = self._agents.get(client_id)
+        if not st:
+            return "idle"
+        if not self._is_online(st):
+            return "offline"
+        return derive_online_state(st.get("activity", "idle"), st.get("playback"))
 
     def _keep_last(self, st: dict, key: str, value) -> None:
         """비어서 오는 보고는 무시하고 **마지막으로 확인된 값**을 유지한다.
