@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 OFFLINE_AFTER_SEC = 45.0
 
 
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -153,17 +154,33 @@ class AgentRegistry:
         st["devices"] = msg.get("devices", []) or []
         st["playback"] = msg.get("playback")  # None 이면 재생 안 함
         st["scenario_count"] = len(msg.get("scenarios", []) or [])
-        # 현재 UI 모드(#test/#admin/#stats/normal)와 페이지. 브라우저가 닫혀 있으면 빈 값.
-        st["ui"] = msg.get("ui") or {}
+        # 현재 UI 모드(#test/#admin/#stats/normal)와 페이지.
+        # 비어 오는 보고는 무시하고 마지막 값을 유지한다(_keep_last) — 매 tick 깜빡이면 못 읽는다.
+        self._keep_last(st, "ui", msg.get("ui") or {})
         # usage_stats 는 값이 바뀌었을 때만(약 60초 주기) 전송된다 — 대역폭 절감.
         # 키가 아예 없으면 "변경 없음"이므로 **마지막 값을 그대로 유지**한다.
         # (msg.get() 으로 덮어쓰면 매 tick None 이 되어 함수통계가 사라진다)
         if "usage_stats" in msg:
             st["usage_stats"] = msg["usage_stats"]
-        # 로그인 사용자 {user_id, name, title, team, project}. 키가 있을 때만 반영 —
-        # None(로그아웃/미로그인)도 유효한 값이므로 usage_stats 와 달리 그대로 덮어쓴다.
-        if "user" in msg:
-            st["user"] = msg.get("user") or None
+        # 로그인 사용자 {user_id, name, title, team, project}.
+        # 비어 왔다고 지우지 않는다 — 부서/프로젝트가 정렬 키라서, 한 tick 빠지는 것만으로
+        # 행이 미로그인 그룹으로 내려갔다 올라온다(_keep_last 참고).
+        self._keep_last(st, "user", msg.get("user") or None)
+
+    def _keep_last(self, st: dict, key: str, value) -> None:
+        """비어서 오는 보고는 무시하고 **마지막으로 확인된 값**을 유지한다.
+
+        에이전트는 ReplayKit 브라우저가 한 tick 응답을 못 하면 user/ui 를 빈 값으로 채워 보낸다.
+        그대로 반영하면 관제 표의 사용자/부서/프로젝트·모드 칸이 2초마다 깜빡이고,
+        부서순 정렬에서는 그 행이 '미로그인' 그룹으로 내려갔다 올라오기를 반복한다.
+
+        한 번 확인된 값은 지우지 않는다 — 관제 화면에서는 빈칸보다 '마지막으로 쓴 사람/모드'
+        가 쓸모 있다. 다른 사용자가 로그인하면 그때 새 값으로 덮인다.
+        """
+        if value:
+            st[key] = value
+        else:
+            st.setdefault(key, value)   # 아직 한 번도 못 받았을 때만 빈 값으로 초기화
 
     def mark_offline(self, client_id: str) -> None:
         st = self._agents.get(client_id)
