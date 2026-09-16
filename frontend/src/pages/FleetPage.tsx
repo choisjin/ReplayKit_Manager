@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button, Card, Col, Empty, Modal, Progress, Row, Segmented, Select, Statistic, Table, Tag, theme, Tooltip, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { DeleteOutlined, DesktopOutlined, PlayCircleOutlined, SortAscendingOutlined, UserOutlined, VideoCameraOutlined } from '@ant-design/icons';
@@ -336,6 +336,11 @@ function relTime(iso?: string): string {
   return `${Math.floor(sec / 3600)}시간 전`;
 }
 
+// 표 아래 여백 — App.tsx 의 Content 가 갖는 padding-bottom(24) + margin-bottom(16).
+// 헤더 행·푸터 높이는 상수로 두지 않고 실제 DOM 에서 잰다(_measure 참고) — 폰트나 테마가
+// 바뀌면 값이 달라져서, 상수로 박아 두면 창에 군더더기 스크롤이 생긴다.
+const GAP_BELOW = 40;
+
 /** 값 없음 — 빈 칸으로 두면 격자만 남아 '데이터가 안 온 건가' 싶으니 옅은 대시로 채운다. */
 const DASH = <span style={{ opacity: 0.3 }}>—</span>;
 
@@ -380,6 +385,9 @@ export default function FleetPage() {
   const [teamFilter, setTeamFilter] = useState('');
   const [projectFilter, setProjectFilter] = useState('');
   const timer = useRef<number | null>(null);
+  // 표 본문 높이(틀 고정용) — 마운트 후 실제 위치를 재서 채운다
+  const tableWrapRef = useRef<HTMLDivElement>(null);
+  const [bodyHeight, setBodyHeight] = useState(420);
 
   // 표시 순서(client_id 목록)를 얼려 둔다 — 행 위치는 여기서만 정해진다.
   // 필터와는 무관하게 **전체 PC** 기준으로 한 번 세워 두고, 화면에는 필터를 통과한 것만 그린다
@@ -493,6 +501,25 @@ export default function FleetPage() {
   }, [agents, order, teamFilter, projectFilter]);
 
   const onlineCount = useMemo(() => rows.filter(a => a.online).length, [rows]);
+
+  // 표 본문 높이 — 표가 시작되는 지점부터 창 아래까지를 그대로 쓴다.
+  // 고정값을 쓰면 모니터마다 표가 잘리거나 빈 공간이 남는다.
+  useLayoutEffect(() => {
+    const measure = () => {
+      const wrap = tableWrapRef.current;
+      if (!wrap) return;
+      const bodyEl = wrap.querySelector<HTMLElement>('.ant-table-body');
+      // 표에서 본문이 아닌 부분(고정 헤더 행 + 요약 푸터 + 테두리)의 높이.
+      // bodyHeight 와 무관하게 일정하므로 한 번 재면 그대로 쓸 수 있다.
+      const chrome = bodyEl ? wrap.offsetHeight - bodyEl.offsetHeight : 60;
+      const top = wrap.getBoundingClientRect().top;
+      setBodyHeight(Math.max(200, Math.round(window.innerHeight - top - chrome - GAP_BELOW)));
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+    // 위쪽 요약/범례가 줄바꿈되면 시작 지점이 달라지므로 대수가 바뀔 때도 다시 잰다
+  }, [rows.length]);
 
   // 범례에 상태별 대수도 같이 — 색이 무슨 뜻인지 + 지금 몇 대인지 한 줄에서 읽힌다.
   const stateCount = useMemo(() => {
@@ -672,15 +699,6 @@ export default function FleetPage() {
   return (
     <div>
       <style>{TABLE_CSS}</style>
-      <Typography.Title level={4} style={{ marginTop: 0 }}>
-        <DesktopOutlined /> 테스트 PC 관제
-      </Typography.Title>
-      <Typography.Paragraph type="secondary">
-        각 테스트 PC 가 관제 서버(이 서버)로 보고한 실시간 재생 상태입니다. PC 식별은 하드웨어 머신 UID 기준이며,
-        표시된 IP 는 참고용입니다. (2초마다 자동 갱신 · 한 번 등록된 PC 는 목록에서 사라지지 않고
-        행 위치도 고정됩니다 — 새 PC 가 처음 들어올 때만 제 자리에 끼어들고, 그 밖에는 상태가
-        바뀌거나 접속이 끊겨도 그 자리에서 칸 내용만 바뀝니다. 줄을 다시 세우려면 '재정렬')
-      </Typography.Paragraph>
 
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col xs={12} sm={6}><Card size="small"><Statistic title="전체 PC" value={summary.total} /></Card></Col>
@@ -733,6 +751,8 @@ export default function FleetPage() {
         </Tooltip>
       </div>
 
+      {/* 표 본문에 남은 화면 높이를 전부 준다 — 헤더 행은 고정되고 본문만 스크롤된다 */}
+      <div ref={tableWrapRef}>
       {rows.length === 0 ? (
         <Empty description={
           loaded
@@ -747,11 +767,12 @@ export default function FleetPage() {
           rowKey="client_id"
           size="small"
           bordered
-          sticky
           columns={columns}
           dataSource={rows}
           pagination={false}
-          scroll={{ x: 1577 }}
+          // y 를 주면 헤더 행이 표 안에 고정되고 본문만 스크롤된다 (엑셀 '틀 고정').
+          // 창 스크롤에 기대는 sticky 와 달리 요약/범례까지 늘 화면에 남는다.
+          scroll={{ x: 1577, y: bodyHeight }}
           // 상태 틴트는 CSS 변수로 넘긴다 (활동 중인 PC 가 대기/오프라인보다 튀어 보이게).
           // 오프라인 행은 fleet-off 로 흐려질 뿐 **자리는 그대로** 둔다.
           onRow={(a) => {
@@ -771,6 +792,7 @@ export default function FleetPage() {
           )}
         />
       )}
+      </div>
     </div>
   );
 }
